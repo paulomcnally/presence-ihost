@@ -1,0 +1,13 @@
+services:
+  presence:
+    build: .
+    image: presence-ihost:latest
+    container_name: presence-ihost
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_RAW
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./data:/app/data
