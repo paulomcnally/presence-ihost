@@ -175,7 +175,15 @@ def save_anyone(conn, value):
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('anyone_home', ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        "1" if value else "0",
+        ("1" if value else "0",),
+    )
+
+
+def save_last_job_run(conn, value):
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('last_job_run', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (value,),
     )
 
 
@@ -399,6 +407,7 @@ def run_once():
             save_anyone(conn, anyone)
 
         save_presence(conn, device_objs)
+        save_last_job_run(conn, now_iso())
         conn.commit()
         LOG.info(
             "done: anyone_home=%s grace=%ss",

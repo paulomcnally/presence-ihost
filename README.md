@@ -23,11 +23,25 @@ From the UI you can configure:
 
 - **VoiceMonkey (Alexa):** enable announcements, set your API token and Speaker device ID, and write the message. Use `{device_name}` in the message to insert the name of the device that arrived, e.g. `{device_name} ha llegado a casa`. A **test button** sends a live announcement so you can verify the config.
 - **Devices:** add/remove the devices to watch (name + MAC address).
-- **Webhook URL:** optional URL that receives a POST JSON on every online/offline event.
+- **Webhook URL:** optional URL that receives a POST JSON on every online/offline event. A **test button** sends a synthetic event.
 - **Scan options:** grace, scan prefix and interfaces.
-- **Current state:** shows live online/offline status of each configured device.
+- **Current state:** shows live online/offline status of each configured device (only after the job has run at least once).
+- **Logs:** last lines of `presence.log`, with an optional auto-refresh every 10s.
 
 The `.env` file is only used as fallback defaults; the SQLite database takes precedence.
+
+### Access control (first run)
+
+The UI is exposed on your LAN, so **by default it asks you to set up a username and password on first load** before showing any configuration. Choose *"Omitir por ahora"* only if you explicitly trust everyone on your network (not recommended). Once credentials exist, the UI (and the whole `/api/*`) requires HTTP Basic Auth.
+
+Credentials are stored as a **bcrypt hash** (never the password in clear). You can also pre-configure them via environment:
+
+| Variable | Description |
+| --- | --- |
+| `SETTINGS_USERNAME` | Username for the settings UI (fallback/pre-config) |
+| `SETTINGS_PASSWORD_HASH` | bcrypt hash of the password. Generate one with `htpasswd -nbBC 10 "" "yourpassword"` (take the 2nd field). If stored in a file, the file must have permissions `600`. |
+
+**Reset flow:** if you forget the credentials, delete the `auth_username` / `auth_password_hash` rows from the `settings` table in `presence.db` (e.g. `sqlite3 /app/data/presence.db "DELETE FROM settings WHERE key LIKE 'auth_%'"`), or set `SETTINGS_USERNAME`/`SETTINGS_PASSWORD_HASH` in `.env` as a rescue. The UI will then show the setup wizard again.
 
 ## Requirements
 
@@ -75,10 +89,21 @@ Configuration is stored in the SQLite database at `/app/data/presence.db` and ma
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /api/config` | Current configuration (settings, devices, VoiceMonkey) |
-| `PUT /api/config` | Save configuration |
-| `GET /api/presence` | Current presence state (`anyone_home` + per-device `present`/`ip`/`last_seen`) |
-| `POST /api/voicemonkey/test` | Send a test VoiceMonkey announcement |
+| `GET /api/auth/status` | Whether UI credentials are configured (`{configured, skipped}`) — used by the first-run wizard |
+| `POST /api/auth/setup` | Create the initial user/password (`{username, password}`) or explicitly skip (`{skip: true}`); only works before credentials exist |
+| `GET /api/config` | Current configuration (settings, devices, VoiceMonkey). `api_key` is returned **masked** as `api_key_masked` + `api_key_set`; never in full |
+| `PUT /api/config` | Save configuration. Validates every field and returns `400` with `{ "errors": { "<field>": "<message>" } }`; an empty/masked `api_key` keeps the stored token |
+| `GET /api/presence` | Current presence state (`anyone_home` + per-device `present`/`ip`/`last_seen`) plus `last_job_run` |
+| `POST /api/voicemonkey/test` | Send a test VoiceMonkey announcement (rate-limited) |
+| `POST /api/webhook/test` | Send a synthetic test event to the configured webhook URL (rate-limited) |
+
+**Security notes:**
+
+- Every `/api/*` route (except `/api/auth/status` and `/api/auth/setup`) requires HTTP Basic Auth once credentials are configured, and is blocked with `403 setup_required` on a fresh install until the wizard runs.
+- State-changing requests (`PUT`, `POST`) must send the header `X-Requested-With: XMLHttpRequest`; this blocks simple cross-site `<form>` CSRF.
+- `PUT /api/config` and the test endpoints are rate-limited (5 requests/min per IP).
+- Responses include `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and a `Content-Security-Policy` (`default-src 'self'`). CORS is same-origin by default (override only via `SETTINGS_CORS_ORIGIN`).
+- **Webhook SSRF limitation:** the webhook URL is only editable by whoever already has access to this authenticated UI (a single home user), so the risk of SSRF is low. If you ever expose this to untrusted users, you should additionally block private/LAN destinations.
 
 ## Webhook payload schema
 

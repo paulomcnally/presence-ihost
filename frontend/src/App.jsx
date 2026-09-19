@@ -3,8 +3,28 @@ import React, { useEffect, useState } from 'react'
 const EMPTY = {
   settings: {},
   devices: [],
-  voicemonkey: { enabled: false, api_key: '', device_id: '', message: '' }
+  voicemonkey: { enabled: false, api_key: '', api_key_masked: '', api_key_set: false, device_id: '', message: '' }
 }
+
+const btnBase =
+  'inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950'
+const btnPrimary = `${btnBase} bg-sky-400 text-slate-950 font-semibold hover:bg-sky-300`
+const btnGhost = `${btnBase} border border-slate-600 text-slate-200 hover:bg-slate-800`
+const btnDanger = `${btnBase} border border-red-800 text-red-400 hover:bg-red-950/40`
+const btnSmall = 'px-2.5 py-1 text-xs'
+const inputCls =
+  'w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-400/60 focus:border-sky-400 disabled:opacity-50'
+const cardCls = 'bg-slate-900 border border-slate-800 rounded-2xl p-6 mb-5 shadow-lg shadow-black/10'
+const h2Cls = 'text-lg font-semibold text-slate-100 mb-1.5'
+const descCls = 'text-sm text-slate-400 mb-4'
+const fieldLabelCls = 'flex items-center gap-1.5 text-sm font-medium text-slate-300'
+const hintCls = 'text-xs text-slate-400'
+const errorCls = 'text-xs text-red-300'
+const warningCls = 'text-xs text-amber-300'
+const spinner = 'inline-block w-3.5 h-3.5 rounded-full border-2 border-slate-950/30 border-t-slate-950 animate-spin align-[-2px] mr-1.5'
+const spinnerLight = 'inline-block w-3.5 h-3.5 rounded-full border-2 border-slate-300/40 border-t-slate-300 animate-spin align-[-2px] mr-1.5'
+const pillCls = (on) =>
+  `inline-block rounded-full px-2.5 py-0.5 text-xs font-semibold ${on ? 'bg-emerald-900 text-emerald-200' : 'bg-red-900/70 text-red-200'}`
 
 const HELP = {
   vm_enabled: {
@@ -42,6 +62,10 @@ const HELP = {
         <p>
           Trátalo como una contraseña: no lo compartas ni lo subas a GitHub. Si crees que se filtró,
           rota el token desde la misma página y actualízalo aquí.
+        </p>
+        <p>
+          El token guardado nunca se muestra completo: solo se muestra enmascarado. Para reemplazarlo
+          pulsa <em>Cambiar token</em>.
         </p>
       </>
     )
@@ -232,13 +256,99 @@ const HELP = {
   }
 }
 
+function validate(cfg, edited) {
+  const errors = {}
+  const warnings = {}
+  const settings = cfg.settings || {}
+  const devices = cfg.devices || []
+  const vm = cfg.voicemonkey || {}
+
+  const grace = parseInt(settings.grace, 10)
+  if (Number.isNaN(grace) || grace < 10 || grace > 3600) {
+    errors.grace = 'Debe estar entre 10 y 3600 segundos'
+  }
+  const sp = parseInt(settings.scan_prefix, 10)
+  if (Number.isNaN(sp) || sp < 16 || sp > 30) {
+    errors.scan_prefix = 'Debe estar entre 16 y 30'
+  }
+  if (settings.ifaces) {
+    const tokens = settings.ifaces.split(',')
+    for (const t of tokens) {
+      if (t.trim() && !/^[a-zA-Z0-9._-]+$/.test(t.trim())) {
+        errors.ifaces = 'Nombre de interfaz inválido'
+        break
+      }
+    }
+  }
+
+  const wh = (settings.webhook_url || '').trim()
+  if (wh) {
+    let parsed = null
+    try {
+      parsed = new URL(wh)
+    } catch (e) {
+      parsed = null
+    }
+    if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) {
+      errors.webhook_url = 'URL inválida'
+    } else if (parsed.protocol === 'http:') {
+      const host = parsed.hostname
+      const lanHost = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host === 'localhost' || host.endsWith('.local') || host.endsWith('.lan')
+      if (!lanHost) errors.webhook_url = 'URL no segura: usa https://'
+      else warnings.webhook_url = 'Usando http:// sin cifrar en tu LAN'
+    }
+  }
+
+  const seen = {}
+  devices.forEach((d, i) => {
+    const key = `devices[${i}]`
+    const name = (d.name || '').trim()
+    if (!name) errors[`${key}.name`] = 'El nombre no puede estar vacío'
+    else if (name.length > 64) errors[`${key}.name`] = 'Máximo 64 caracteres'
+    else if (/[\x00-\x1f\x7f]/.test(name)) errors[`${key}.name`] = 'El nombre contiene caracteres no válidos'
+    const macRaw = (d.mac || '').trim()
+    const mac = macRaw.toLowerCase().replace(/-/g, ':').replace(/\./g, ':')
+    if (!macRaw) errors[`${key}.mac`] = 'La MAC no puede estar vacía'
+    else if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac)) errors[`${key}.mac`] = 'MAC inválida. Formato: aa:bb:cc:dd:ee:ff'
+    else if (seen[mac]) errors[`${key}.mac`] = 'Ya existe un dispositivo con esta MAC'
+    else seen[mac] = true
+  })
+
+  if (vm.enabled) {
+    const hasKey = edited ? (vm.api_key || '').trim() : !!vm.api_key_set
+    if (!hasKey) errors['voicemonkey.api_key'] = 'Requerido si los anuncios están activos'
+    if (!(vm.device_id || '').trim()) errors['voicemonkey.device_id'] = 'Requerido si los anuncios están activos'
+  }
+
+  const msg = vm.message || ''
+  const m = msg.match(/\{device_[^}]*\}/g)
+  if (m && m.some((x) => x !== '{device_name}')) {
+    warnings['voicemonkey.message'] = '¿Quisiste decir `{device_name}`?'
+  }
+
+  return { errors, warnings }
+}
+
+function fieldId(key) {
+  return 'field-' + key.replace(/\[/g, '-').replace(/\]/g, '').replace(/\./g, '-')
+}
+
+function focusField(key) {
+  const el = document.getElementById(fieldId(key))
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.focus({ preventScroll: true })
+  }
+}
+
 function HelpButton({ help, onOpen }) {
   return (
     <button
       type="button"
-      className="help-btn"
       title="Más información"
       aria-label={`Ayuda: ${help.title}`}
+      aria-haspopup="dialog"
+      className="inline-flex items-center justify-center w-[18px] h-[18px] rounded-full border border-slate-500 text-slate-400 text-xs font-bold leading-none hover:bg-sky-400 hover:border-sky-400 hover:text-sky-950 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
       onClick={(e) => {
         e.preventDefault()
         onOpen(help)
@@ -260,65 +370,226 @@ function HelpModal({ help, onClose }) {
 
   if (!help) return null
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h3>{help.title}</h3>
-          <button className="modal-close" onClick={onClose} aria-label="Cerrar">×</button>
+    <div className="fixed inset-0 bg-slate-950/70 flex items-center justify-center p-4 z-50" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full max-h-[82vh] overflow-y-auto shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 bg-slate-900 border-b border-slate-700 px-5 py-4 flex items-center justify-between gap-3">
+          <h3 className="text-base font-semibold text-slate-100">{help.title}</h3>
+          <button onClick={onClose} aria-label="Cerrar" className="text-slate-400 text-2xl leading-none hover:text-slate-100">×</button>
         </div>
-        <div className="modal-body">{help.body}</div>
+        <div className="px-5 py-4 text-sm text-slate-300 leading-relaxed [&_p]:mb-3 [&_ul]:mb-3 [&_ul]:pl-5 [&_li]:mb-1.5 [&_pre]:bg-slate-950 [&_pre]:rounded-md [&_pre]:px-3 [&_pre]:py-2 [&_pre]:overflow-x-auto [&_pre]:text-xs [&_pre]:mb-3">
+          {help.body}
+        </div>
       </div>
     </div>
   )
 }
 
-function Field({ label, value, onChange, type = 'text', placeholder, hint, disabled, help, onHelp }) {
+const bannerKinds = {
+  ok: 'bg-emerald-900/70 border-emerald-700 text-emerald-100',
+  warn: 'bg-amber-900/70 border-amber-700 text-amber-100',
+  error: 'bg-red-900/70 border-red-800 text-red-200'
+}
+
+function Banner({ kind, onClose, children }) {
+  useEffect(() => {
+    if (kind !== 'ok') return
+    const t = setTimeout(onClose, 4000)
+    return () => clearTimeout(t)
+  }, [kind, onClose])
   return (
-    <label className="field">
-      <span className="field-label">
+    <div
+      role={kind === 'ok' ? 'status' : 'alert'}
+      className={`flex items-start justify-between gap-3 rounded-lg border px-4 py-3 mb-4 ${bannerKinds[kind]}`}
+    >
+      <div className="flex-1 text-sm [&_ul]:mt-2 [&_ul]:pl-5 [&_li]:text-xs [&_li]:mb-0.5">{children}</div>
+      <button onClick={onClose} aria-label="Cerrar aviso" className="shrink-0 text-lg leading-none opacity-80 hover:opacity-100">×</button>
+    </div>
+  )
+}
+
+function Switch({ checked, onChange, label, help, onHelp }) {
+  return (
+    <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+      <input
+        type="checkbox"
+        className="peer sr-only"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span
+        aria-hidden="true"
+        className="relative inline-flex w-11 h-6 rounded-full bg-slate-600 transition-colors peer-checked:bg-sky-400 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-5 after:h-5 after:rounded-full after:bg-white after:shadow after:transition-transform peer-checked:after:translate-x-5 peer-focus-visible:ring-2 peer-focus-visible:ring-sky-400 peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-slate-950"
+      />
+      <span className="text-sm text-slate-200">{label}</span>
+      {help && <HelpButton help={help} onOpen={onHelp} />}
+    </label>
+  )
+}
+
+function Field({ id, label, value, onChange, type = 'text', placeholder, hint, disabled, help, onHelp, error, warning, autoComplete }) {
+  const described = []
+  if (error) described.push(`${id}-error`)
+  if (hint) described.push(`${id}-hint`)
+  return (
+    <label className="flex flex-col gap-1.5 flex-1 min-w-0" htmlFor={id}>
+      <span className={fieldLabelCls}>
         {label}
         {help && <HelpButton help={help} onOpen={onHelp} />}
       </span>
       <input
+        id={id}
         type={type}
         value={value}
         placeholder={placeholder}
         disabled={disabled}
+        autoComplete={autoComplete}
+        aria-invalid={error ? 'true' : undefined}
+        aria-describedby={described.length ? described.join(' ') : undefined}
         onChange={(e) => onChange(e.target.value)}
+        className={inputCls}
       />
-      {hint && <small>{hint}</small>}
+      {error && <small id={`${id}-error`} className={errorCls} role="alert">{error}</small>}
+      {warning && !error && <small className={warningCls} role="status">⚠ {warning}</small>}
+      {hint && !error && !warning && <small id={`${id}-hint`} className={hintCls}>{hint}</small>}
     </label>
+  )
+}
+
+function VMKeyField({ vm, edited, visible, onStartEdit, onToggleVisible, onChange, error }) {
+  const id = fieldId('voicemonkey.api_key')
+  const hasStored = !!vm.api_key_set
+  const value = edited ? vm.api_key : (vm.api_key_masked || '')
+  return (
+    <div className="flex flex-col gap-1.5 flex-1 min-w-0">
+      <span className={fieldLabelCls}>API Key (token)</span>
+      <div className="flex gap-2 items-center">
+        <input
+          id={id}
+          type={visible ? 'text' : 'password'}
+          value={value}
+          placeholder={hasStored && !edited ? vm.api_key_masked : 'Pega tu token de VoiceMonkey aquí'}
+          aria-invalid={error ? 'true' : undefined}
+          aria-describedby={error ? `${id}-error` : undefined}
+          onChange={(e) => {
+            if (!edited) onStartEdit()
+            onChange(e.target.value)
+          }}
+          onFocus={() => {
+            if (!edited) onStartEdit()
+          }}
+          autoComplete="off"
+          className={`${inputCls} flex-1`}
+        />
+        <button
+          type="button"
+          onClick={onToggleVisible}
+          disabled={!edited}
+          aria-disabled={!edited}
+          title={edited ? (visible ? 'Ocultar token' : 'Revelar token temporalmente') : 'Solo se puede revelar al escribir un token nuevo'}
+          className={`${btnGhost} ${btnSmall} shrink-0`}
+        >
+          {visible ? 'Ocultar' : 'Mostrar'}
+        </button>
+        {!edited && hasStored && (
+          <button type="button" className={`${btnGhost} ${btnSmall} shrink-0`} onClick={() => { onChange(''); onStartEdit() }}>
+            Cambiar token
+          </button>
+        )}
+      </div>
+      {!edited && hasStored && <small className={hintCls}>Token guardado y oculto. Para reemplazarlo pulsa «Cambiar token».</small>}
+      {error && <small id={`${id}-error`} className={errorCls} role="alert">{error}</small>}
+    </div>
   )
 }
 
 export default function App() {
   const [cfg, setCfg] = useState(EMPTY)
   const [loaded, setLoaded] = useState(false)
-  const [error, setError] = useState('')
-  const [saved, setSaved] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [testing, setTesting] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [authReady, setAuthReady] = useState(false)
+  const [authState, setAuthState] = useState({ configured: false, skipped: false })
+  const [setup, setSetup] = useState({ username: '', password: '', error: '', busy: false })
+
+  const [saveState, setSaveState] = useState('idle')
+  const [saveErrors, setSaveErrors] = useState({})
+  const [saveMsg, setSaveMsg] = useState('')
+
+  const [vmKeyEdited, setVmKeyEdited] = useState(false)
+  const [vmKeyVisible, setVmKeyVisible] = useState(false)
+
+  const [testState, setTestState] = useState('idle')
   const [testMsg, setTestMsg] = useState('')
+
+  const [whTest, setWhTest] = useState({ state: 'idle', msg: '' })
+
   const [presence, setPresence] = useState(null)
   const [help, setHelp] = useState(null)
   const [logs, setLogs] = useState(null)
+  const [logsLoading, setLogsLoading] = useState(false)
+  const [logsAuto, setLogsAuto] = useState(false)
+
+  const showWizard = authReady && !authState.configured && !authState.skipped
+  const { errors: liveErrors, warnings: liveWarnings } = validate(cfg, vmKeyEdited)
+  const canEdit = authState.configured || authState.skipped
 
   useEffect(() => {
+    fetch('/api/auth/status')
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((s) => {
+        setAuthState({ configured: !!s.configured, skipped: !!s.skipped })
+        setAuthReady(true)
+      })
+      .catch(() => setAuthReady(true))
+  }, [])
+
+  function loadConfig() {
+    setLoading(true)
+    setLoadError('')
     fetch('/api/config')
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+      .then(async (r) => {
+        if (r.status === 401) throw new Error('AUTH_REQUIRED')
+        if (!r.ok) throw new Error('HTTP ' + r.status)
+        return r.json()
+      })
       .then((data) => {
         setCfg({ ...EMPTY, ...data, voicemonkey: { ...EMPTY.voicemonkey, ...data.voicemonkey } })
         setLoaded(true)
+        setLoading(false)
       })
-      .catch((e) => setError('No se pudo cargar la configuración: ' + e.message))
-  }, [])
+      .catch((e) => {
+        setLoading(false)
+        setLoadError(
+          e.message === 'AUTH_REQUIRED'
+            ? 'Acceso denegado. Recarga la página e inicia sesión con las credenciales configuradas.'
+            : 'No se pudo cargar la configuración: ' + e.message
+        )
+      })
+  }
 
   useEffect(() => {
+    if (!authReady || !canEdit) return
+    loadConfig()
+  }, [authReady, canEdit])
+
+  useEffect(() => {
+    if (!loaded) return
     fetch('/api/presence')
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
       .then(setPresence)
       .catch(() => setPresence(null))
   }, [loaded])
+
+  useEffect(() => {
+    if (!logsAuto) return
+    const t = setInterval(() => loadLogs(), 10000)
+    return () => clearInterval(t)
+  }, [logsAuto])
 
   function setSetting(key, value) {
     setCfg((c) => ({ ...c, settings: { ...c.settings, [key]: value } }))
@@ -344,217 +615,483 @@ export default function App() {
   }
 
   function loadLogs() {
+    setLogsLoading(true)
     fetch('/api/log')
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
       .then(setLogs)
       .catch(() => setLogs(null))
+      .finally(() => setLogsLoading(false))
+  }
+
+  function buildPayload() {
+    return {
+      ...cfg,
+      voicemonkey: { ...cfg.voicemonkey, api_key: vmKeyEdited ? cfg.voicemonkey.api_key : '' }
+    }
   }
 
   async function save() {
-    setError('')
-    setSaved(false)
-    setSaving(true)
+    const { errors } = validate(cfg, vmKeyEdited)
+    if (Object.keys(errors).length > 0) {
+      setSaveErrors(errors)
+      setSaveState('validation')
+      focusField(Object.keys(errors)[0])
+      return
+    }
+    setSaveErrors({})
+    setSaveState('saving')
+    setSaveMsg('')
     try {
       const res = await fetch('/api/config', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cfg)
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify(buildPayload())
       })
+      if (res.status === 400) {
+        const data = await res.json().catch(() => ({}))
+        const errs = data.errors || {}
+        setSaveErrors(errs)
+        setSaveState('validation')
+        focusField(Object.keys(errs)[0] || 'grace')
+        return
+      }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || 'HTTP ' + res.status)
+        setSaveMsg(data.error || 'HTTP ' + res.status)
+        setSaveState('error')
+        return
       }
       const data = await res.json()
       setCfg({ ...EMPTY, ...data, voicemonkey: { ...EMPTY.voicemonkey, ...data.voicemonkey } })
-      setSaved(true)
+      setVmKeyEdited(false)
+      setVmKeyVisible(false)
+      setSaveState('ok')
     } catch (e) {
-      setError(e.message)
-    } finally {
-      setSaving(false)
+      setSaveMsg(e.message)
+      setSaveState('error')
     }
   }
 
   async function testVoiceMonkey() {
-    setError('')
+    setTestState('sending')
     setTestMsg('')
-    setTesting(true)
     try {
       const res = await fetch('/api/voicemonkey/test', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cfg.voicemonkey)
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({
+          api_key: vmKeyEdited ? cfg.voicemonkey.api_key : '',
+          device_id: cfg.voicemonkey.device_id,
+          message: cfg.voicemonkey.message
+        })
       })
+      const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || 'HTTP ' + res.status)
+        setTestState('error')
+        setTestMsg(data.error || 'HTTP ' + res.status)
+        return
       }
+      setTestState('ok')
       setTestMsg('Anuncio enviado correctamente a Alexa.')
     } catch (e) {
-      setError('Fallo al enviar anuncio: ' + e.message)
-    } finally {
-      setTesting(false)
+      setTestState('error')
+      setTestMsg(e.message)
     }
   }
 
+  async function testWebhook() {
+    setWhTest({ state: 'sending', msg: '' })
+    try {
+      const res = await fetch('/api/webhook/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ url: (cfg.settings.webhook_url || '').trim() })
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setWhTest({ state: 'error', msg: data.error || 'HTTP ' + res.status })
+        return
+      }
+      setWhTest({ state: 'ok', msg: 'Evento de prueba enviado.' })
+    } catch (e) {
+      setWhTest({ state: 'error', msg: e.message })
+    }
+  }
+
+  async function submitSetup(skip) {
+    setSetup((s) => ({ ...s, busy: true, error: '' }))
+    try {
+      const body = skip ? { skip: true } : { username: setup.username, password: setup.password }
+      const res = await fetch('/api/auth/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify(body)
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status)
+      setSetup({ username: '', password: '', error: '', busy: false })
+      const st = await fetch('/api/auth/status').then((r) => r.json()).catch(() => ({}))
+      setAuthState({ configured: !!st.configured, skipped: !!st.skipped })
+    } catch (e) {
+      setSetup((s) => ({ ...s, busy: false, error: e.message }))
+    }
+  }
+
+  const vm = cfg.voicemonkey || EMPTY.voicemonkey
+  const vmHasKey = vmKeyEdited ? (vm.api_key || '').trim() : !!vm.api_key_set
+  const vmCanTest = vm.enabled && !!vmHasKey && !!(vm.device_id || '').trim()
+  const vmTestDisabledReason = !vm.enabled
+    ? 'Activa los anuncios para poder enviar una prueba.'
+    : !vmHasKey
+      ? 'Falta la API Key de VoiceMonkey.'
+      : 'Falta el Device ID de VoiceMonkey.'
+
+  const whUrl = (cfg.settings.webhook_url || '').trim()
+  const whCanTest = whUrl !== '' && !liveErrors.webhook_url
+  const whTestDisabledReason = whUrl === '' ? 'Introduce una URL de webhook primero.' : 'La URL no es válida.'
+
   return (
-    <main className="page">
-      <header>
-        <h1>Presence iHost</h1>
-        <p className="subtitle">Configuración del job de presencia y anuncios a Alexa (cada minuto)</p>
+    <main className="max-w-[760px] mx-auto px-4 py-8 pb-16">
+      <header className="mb-6">
+        <h1 className="text-2xl font-bold text-slate-100">Presence iHost</h1>
+        <p className="text-sm text-slate-400 mt-1">Configuración del job de presencia y anuncios a Alexa (cada minuto)</p>
       </header>
 
-      {!loaded && !error && <p>Cargando…</p>}
-      {error && <div className="banner error">{error}</div>}
-      {saved && <div className="banner ok">Configuración guardada correctamente.</div>}
+      {!authReady && <p className="text-slate-400">Cargando…</p>}
 
-      {loaded && (
-        <>
-          <section className="card">
-            <h2>
-              VoiceMonkey (Alexa)
-              <HelpButton help={HELP.vm_enabled} onOpen={setHelp} />
-            </h2>
-            <p className="desc">
-              Cuando alguien llegue a casa se enviará un anuncio con el nombre del dispositivo a tu Alexa.
-              El mensaje puede incluir <code>{'{device_name}'}</code> para insertar el nombre del dispositivo.
-            </p>
-            <div className="grid">
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={cfg.voicemonkey.enabled}
-                  onChange={(e) => setVM('enabled', e.target.checked)}
-                />
-                <span>Activar anuncios</span>
-                <HelpButton help={HELP.vm_enabled} onOpen={setHelp} />
-              </label>
-            </div>
-            <div className="grid">
-              <Field label="API Key (token)" value={cfg.voicemonkey.api_key} onChange={(v) => setVM('api_key', v)} placeholder="Pega tu token de VoiceMonkey aquí" help={HELP.vm_api_key} onHelp={setHelp} />
-              <Field label="Device ID" value={cfg.voicemonkey.device_id} onChange={(v) => setVM('device_id', v)} placeholder="P. ej. dev_8f3k2m9x" help={HELP.vm_device_id} onHelp={setHelp} />
-            </div>
-            <Field
-              label="Mensaje"
-              value={cfg.voicemonkey.message}
-              onChange={(v) => setVM('message', v)}
-              placeholder={'{device_name} ha llegado a casa'}
-              help={HELP.vm_message}
-              onHelp={setHelp}
-            />
-            <button className="btn ghost" onClick={testVoiceMonkey} disabled={testing}>
-              {testing ? 'Enviando…' : 'Enviar anuncio de prueba'}
-            </button>
-            {testMsg && <p className="ok-text">{testMsg}</p>}
-          </section>
-
-          <section className="card">
-            <h2>Dispositivos</h2>
-            <p className="desc">Dispositivos a vigilar en la red local. Nombre y dirección MAC.</p>
-            {cfg.devices.length === 0 && <p className="muted">No hay dispositivos configurados.</p>}
-            {cfg.devices.map((d, i) => (
-              <div className="device-row" key={i}>
-                <Field label="Nombre" value={d.name} onChange={(v) => setDevice(i, 'name', v)} placeholder="Iphone de Paulo" help={HELP.device_name} onHelp={setHelp} />
-                <Field label="MAC" value={d.mac} onChange={(v) => setDevice(i, 'mac', v)} placeholder="00:11:22:33:44:55" help={HELP.device_mac} onHelp={setHelp} />
-                <button className="btn danger" onClick={() => removeDevice(i)}>Quitar</button>
-              </div>
-            ))}
-            <button className="btn ghost" onClick={addDevice}>+ Añadir dispositivo</button>
-          </section>
-
-          {presence && (
-            <section className="card">
-              <h2>Estado actual</h2>
-              <p className="desc">
-                Alguien en casa:{' '}
-                <span className={presence.anyone_home ? 'pill online' : 'pill offline'}>
-                  {presence.anyone_home ? 'Sí' : 'No'}
-                </span>
-              </p>
-              {presence.devices.map((d) => (
-                <div className="presence-row" key={d.mac}>
-                  <span className="status-dot" data-status={d.present ? 'online' : 'offline'}></span>
-                  <span className="pname">{d.name}</span>
-                  <span className="pmac">{d.mac}</span>
-                  <span className={d.present ? 'pill online' : 'pill offline'}>
-                    {d.present ? 'online' : 'offline'}
-                  </span>
-                  {d.ip && <span className="pip">{d.ip}</span>}
-                </div>
-              ))}
-            </section>
+      {authReady && showWizard && (
+        <section className={`${cardCls} max-w-xl`}>
+          <h2 className={h2Cls}>Configura tu acceso</h2>
+          <p className={descCls}>
+            La interfaz está expuesta en tu red local. Antes de configurar tus dispositivos y tokens,
+            protege el acceso con un usuario y contraseña.
+          </p>
+          <div className="flex flex-col gap-3">
+            <Field id="field-setup-username" label="Usuario" value={setup.username} onChange={(v) => setSetup((s) => ({ ...s, username: v }))} autoComplete="username" />
+            <Field id="field-setup-password" label="Contraseña (mínimo 8 caracteres)" type="password" value={setup.password} onChange={(v) => setSetup((s) => ({ ...s, password: v }))} autoComplete="new-password" />
+          </div>
+          {setup.error && (
+            <div className="rounded-lg border border-red-800 bg-red-900/70 text-red-200 px-4 py-3 text-sm mt-3">{setup.error}</div>
           )}
-
-          <section className="card">
-            <h2>Webhook</h2>
-            <p className="desc">
-              URL que recibe un <code>POST</code> JSON cuando un dispositivo pasa a{' '}
-              <strong>online</strong> u <strong>offline</strong>. Déjala vacía para no enviar nada.
-            </p>
-            <Field
-              label="Webhook URL"
-              value={cfg.settings.webhook_url || ''}
-              onChange={(v) => setSetting('webhook_url', v)}
-              placeholder="https://hooks.ejemplo.com/presencia"
-              help={HELP.webhook_url}
-              onHelp={setHelp}
-            />
-            <details className="schema">
-              <summary>Ver schema del payload</summary>
-              <pre>{JSON.stringify({
-                event: 'device_present',
-                ts: '2026-09-19T10:00:00+00:00',
-                device_name: 'Iphone de Paulo',
-                mac: '00:11:22:33:44:55',
-                ip: '192.168.1.100',
-                status: 'online'
-              }, null, 2)}</pre>
-              <p>
-                <code>event</code>: <code>device_present</code> | <code>device_away</code> |{' '}
-                <code>anyone_home</code> | <code>anyone_away</code>. En <code>anyone_*</code> no se
-                incluyen <code>device_name</code>/<code>mac</code>/<code>ip</code>.
-              </p>
-            </details>
-          </section>
-
-          <section className="card">
-            <h2>Escaneo</h2>
-            <p className="desc">
-              El escaneo se ejecuta como un job cada 1 minuto (cron). Aquí solo se ajusta la
-              tolerancia y las interfaces.
-            </p>
-            <div className="grid">
-              <Field label="Grace (s)" type="number" value={cfg.settings.grace || '180'} onChange={(v) => setSetting('grace', v)} hint="Segundos sin verse antes de marcarse offline" help={HELP.grace} onHelp={setHelp} />
-              <Field label="Scan prefix" type="number" value={cfg.settings.scan_prefix || '24'} onChange={(v) => setSetting('scan_prefix', v)} hint="Tamaño máximo de subred a escanear" help={HELP.scan_prefix} onHelp={setHelp} />
-            </div>
-            <Field label="Interfaces (IFACES)" value={cfg.settings.ifaces || ''} onChange={(v) => setSetting('ifaces', v)} placeholder="Déjalo vacío (auto) o p. ej. eth0,wlan0" hint="Separadas por coma. Vacío = auto-detección" help={HELP.ifaces} onHelp={setHelp} />
-          </section>
-
-          <section className="card">
-            <h2>
-              Logs
-              <button className="btn ghost small" onClick={loadLogs}>Actualizar</button>
-            </h2>
-            <p className="desc">
-              Últimas ejecuciones del job de presencia (cada minuto). Útil para ver por qué no llegó
-              un anuncio de VoiceMonkey: busca <code>voicemonkey announce sent</code> o{' '}
-              <code>failed</code>.
-            </p>
-            {logs && (
-              <pre className="log-view">{logs.exists ? logs.lines.join('\n') : 'No hay log todavía.'}</pre>
-            )}
-          </section>
-
-          <div className="actions">
-            <button className="btn primary" onClick={save} disabled={saving}>
-              {saving ? (
-                <>
-                  <span className="spinner" aria-hidden="true"></span> Guardando…
-                </>
-              ) : (
-                'Guardar configuración'
-              )}
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button className={btnPrimary} onClick={() => submitSetup(false)} disabled={setup.busy || !setup.username.trim() || setup.password.length < 8}>
+              {setup.busy ? 'Creando…' : 'Crear acceso'}
+            </button>
+            <button className={btnGhost} onClick={() => submitSetup(true)} disabled={setup.busy}>
+              Omitir por ahora, no recomendado
             </button>
           </div>
+        </section>
+      )}
+
+      {authReady && !showWizard && canEdit && (
+        <>
+          {loadError && <Banner kind="error" onClose={() => setLoadError('')}>{loadError}</Banner>}
+          {loadError && (
+            <div className="mb-4">
+              <button className={btnGhost} onClick={loadConfig}>Reintentar</button>
+            </div>
+          )}
+          {loading && <p className="text-slate-400">Cargando configuración…</p>}
+          {!loading && !loadError && !loaded && <p className="text-slate-400">No se pudo cargar la configuración.</p>}
+
+          {saveState === 'ok' && (
+            <Banner kind="ok" onClose={() => setSaveState('idle')}>Configuración guardada correctamente.</Banner>
+          )}
+          {saveState === 'validation' && Object.keys(saveErrors).length > 0 && (
+            <Banner kind="warn" onClose={() => setSaveState('idle')}>
+              <strong>No se pudo guardar:</strong> revisa los campos marcados en rojo.
+              <ul>
+                {Object.entries(saveErrors).map(([k, v]) => (
+                  <li key={k}>{k}: {v}</li>
+                ))}
+              </ul>
+            </Banner>
+          )}
+          {saveState === 'error' && (
+            <Banner kind="error" onClose={() => setSaveState('idle')}>{saveMsg || 'No se pudo guardar la configuración.'}</Banner>
+          )}
+
+          {loaded && (
+            <>
+              <section className={cardCls}>
+                <h2 className={h2Cls}>
+                  VoiceMonkey (Alexa)
+                  <HelpButton help={HELP.vm_enabled} onOpen={setHelp} />
+                </h2>
+                <p className={descCls}>
+                  Cuando alguien llegue a casa se enviará un anuncio con el nombre del dispositivo a tu Alexa.
+                  El mensaje puede incluir <code>{'{device_name}'}</code> para insertar el nombre del dispositivo.
+                </p>
+                <Switch
+                  checked={vm.enabled}
+                  onChange={(v) => setVM('enabled', v)}
+                  label="Activar anuncios"
+                  help={HELP.vm_enabled}
+                  onHelp={setHelp}
+                />
+                {!vm.enabled ? (
+                  <p className="text-sm text-slate-400 mt-3">Activa los anuncios para configurar VoiceMonkey.</p>
+                ) : (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-2 mt-4">
+                      <VMKeyField
+                        vm={vm}
+                        edited={vmKeyEdited}
+                        visible={vmKeyVisible}
+                        onStartEdit={() => setVmKeyEdited(true)}
+                        onToggleVisible={() => setVmKeyVisible((v) => !v)}
+                        onChange={(v) => setVM('api_key', v)}
+                        error={liveErrors['voicemonkey.api_key']}
+                      />
+                      <Field
+                        id={fieldId('voicemonkey.device_id')}
+                        label="Device ID"
+                        value={vm.device_id}
+                        onChange={(v) => setVM('device_id', v)}
+                        placeholder="P. ej. dev_8f3k2m9x"
+                        help={HELP.vm_device_id}
+                        onHelp={setHelp}
+                        error={liveErrors['voicemonkey.device_id']}
+                      />
+                    </div>
+                    <div className="mt-3">
+                      <Field
+                        id={fieldId('voicemonkey.message')}
+                        label="Mensaje"
+                        value={vm.message}
+                        onChange={(v) => setVM('message', v)}
+                        placeholder={'{device_name} ha llegado a casa'}
+                        help={HELP.vm_message}
+                        onHelp={setHelp}
+                        warning={liveWarnings['voicemonkey.message']}
+                      />
+                    </div>
+                    <div className="mt-4 flex items-center gap-3 flex-wrap">
+                      <button
+                        className={btnGhost}
+                        onClick={testVoiceMonkey}
+                        disabled={!vmCanTest || testState === 'sending'}
+                        aria-disabled={!vmCanTest}
+                        title={vmCanTest ? undefined : vmTestDisabledReason}
+                      >
+                        {testState === 'sending' ? 'Enviando…' : 'Enviar anuncio de prueba'}
+                      </button>
+                      {!vmCanTest && vm.enabled && <small className={hintCls}>{vmTestDisabledReason}</small>}
+                    </div>
+                    {testState === 'ok' && <p className="text-emerald-400 text-sm mt-2">✅ Anuncio enviado correctamente a Alexa.</p>}
+                    {testState === 'error' && <p className="text-red-400 text-sm mt-2">❌ Error: {testMsg}</p>}
+                  </>
+                )}
+              </section>
+
+              <section className={cardCls}>
+                <h2 className={h2Cls}>Dispositivos</h2>
+                <p className={descCls}>Dispositivos a vigilar en la red local. Nombre y dirección MAC.</p>
+                {cfg.devices.length === 0 && (
+                  <div className="border border-dashed border-slate-600 rounded-lg p-4 text-sm text-slate-400 mb-3">
+                    <p>
+                      Aún no has añadido dispositivos. Añade al menos uno para que el job de presencia
+                      tenga algo que vigilar.
+                    </p>
+                  </div>
+                )}
+                {cfg.devices.map((d, i) => (
+                  <div className="flex flex-col md:flex-row gap-3 md:items-end mb-3" key={i}>
+                    <Field
+                      id={fieldId(`devices[${i}].name`)}
+                      label="Nombre"
+                      value={d.name}
+                      onChange={(v) => setDevice(i, 'name', v)}
+                      placeholder="Iphone de Paulo"
+                      help={HELP.device_name}
+                      onHelp={setHelp}
+                      error={liveErrors[`devices[${i}].name`]}
+                    />
+                    <Field
+                      id={fieldId(`devices[${i}].mac`)}
+                      label="MAC"
+                      value={d.mac}
+                      onChange={(v) => setDevice(i, 'mac', v)}
+                      placeholder="00:11:22:33:44:55"
+                      help={HELP.device_mac}
+                      onHelp={setHelp}
+                      error={liveErrors[`devices[${i}].mac`]}
+                    />
+                    <button className={`${btnDanger} md:mb-0.5 shrink-0`} onClick={() => removeDevice(i)}>Quitar</button>
+                  </div>
+                ))}
+                <button className={`${btnGhost} ${btnSmall}`} onClick={addDevice}>+ Añadir dispositivo</button>
+              </section>
+
+              {presence && (
+                <section className={cardCls}>
+                  <h2 className={h2Cls}>Estado actual</h2>
+                  {!presence.last_job_run ? (
+                    <p className="text-sm text-slate-400">Sin datos aún: el job de presencia todavía no ha corrido.</p>
+                  ) : (
+                    <>
+                      <p className={descCls}>Última ejecución del job: {presence.last_job_run}</p>
+                      <p className={descCls}>
+                        Alguien en casa:{' '}
+                        <span className={pillCls(presence.anyone_home)}>
+                          {presence.anyone_home ? 'Sí' : 'No'}
+                        </span>
+                      </p>
+                      {presence.devices.map((d) => (
+                        <div className="flex items-center gap-2.5 py-1.5 text-sm" key={d.mac}>
+                          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${d.present ? 'bg-emerald-400' : 'bg-slate-500'}`}></span>
+                          <span className="font-semibold text-slate-200">{d.name}</span>
+                          <span className="text-xs text-slate-400">{d.mac}</span>
+                          <span className={pillCls(d.present)}>
+                            {d.present ? 'online' : 'offline'}
+                          </span>
+                          {d.ip && <span className="text-xs text-slate-400 ml-auto">{d.ip}</span>}
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </section>
+              )}
+
+              <section className={cardCls}>
+                <h2 className={h2Cls}>Webhook</h2>
+                <p className={descCls}>
+                  URL que recibe un <code>POST</code> JSON cuando un dispositivo pasa a{' '}
+                  <strong>online</strong> u <strong>offline</strong>. Déjala vacía para no enviar nada.
+                </p>
+                <Field
+                  id={fieldId('webhook_url')}
+                  label="Webhook URL"
+                  value={cfg.settings.webhook_url || ''}
+                  onChange={(v) => { setSetting('webhook_url', v); if (whTest.state !== 'idle') setWhTest({ state: 'idle', msg: '' }) }}
+                  placeholder="https://hooks.ejemplo.com/presencia"
+                  help={HELP.webhook_url}
+                  onHelp={setHelp}
+                  error={liveErrors.webhook_url}
+                  warning={liveWarnings.webhook_url}
+                />
+                <div className="mt-4 flex items-center gap-3 flex-wrap">
+                  <button
+                    className={btnGhost}
+                    onClick={testWebhook}
+                    disabled={!whCanTest || whTest.state === 'sending'}
+                    aria-disabled={!whCanTest}
+                    title={whCanTest ? undefined : whTestDisabledReason}
+                  >
+                    {whTest.state === 'sending' ? 'Enviando…' : 'Enviar evento de prueba'}
+                  </button>
+                  {!whCanTest && whUrl === '' && <small className={hintCls}>{whTestDisabledReason}</small>}
+                </div>
+                {whTest.state === 'ok' && <p className="text-emerald-400 text-sm mt-2">✅ {whTest.msg}</p>}
+                {whTest.state === 'error' && <p className="text-red-400 text-sm mt-2">❌ Error: {whTest.msg}</p>}
+                <details className="mt-4">
+                  <summary className="text-sky-400 text-sm cursor-pointer">Ver schema del payload</summary>
+                  <pre className="bg-slate-950 rounded-lg p-3 mt-2 overflow-x-auto text-xs">{JSON.stringify({
+                    event: 'device_present',
+                    ts: '2026-09-19T10:00:00+00:00',
+                    device_name: 'Iphone de Paulo',
+                    mac: '00:11:22:33:44:55',
+                    ip: '192.168.1.100',
+                    status: 'online'
+                  }, null, 2)}</pre>
+                  <p className="text-xs text-slate-400 mt-2">
+                    <code>event</code>: <code>device_present</code> | <code>device_away</code> |{' '}
+                    <code>anyone_home</code> | <code>anyone_away</code>. En <code>anyone_*</code> no se
+                    incluyen <code>device_name</code>/<code>mac</code>/<code>ip</code>.
+                  </p>
+                </details>
+              </section>
+
+              <section className={cardCls}>
+                <h2 className={h2Cls}>Escaneo</h2>
+                <p className={descCls}>
+                  El escaneo se ejecuta como un job cada 1 minuto (cron). Aquí solo se ajusta la
+                  tolerancia y las interfaces.
+                </p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Field
+                    id={fieldId('grace')}
+                    label="Grace (s)"
+                    type="number"
+                    value={cfg.settings.grace || '180'}
+                    onChange={(v) => setSetting('grace', v)}
+                    hint="Segundos sin verse antes de marcarse offline"
+                    help={HELP.grace}
+                    onHelp={setHelp}
+                    error={liveErrors.grace}
+                  />
+                  <Field
+                    id={fieldId('scan_prefix')}
+                    label="Scan prefix"
+                    type="number"
+                    value={cfg.settings.scan_prefix || '24'}
+                    onChange={(v) => setSetting('scan_prefix', v)}
+                    hint="Tamaño máximo de subred a escanear"
+                    help={HELP.scan_prefix}
+                    onHelp={setHelp}
+                    error={liveErrors.scan_prefix}
+                  />
+                </div>
+                <div className="mt-3">
+                  <Field
+                    id={fieldId('ifaces')}
+                    label="Interfaces (IFACES)"
+                    value={cfg.settings.ifaces || ''}
+                    onChange={(v) => setSetting('ifaces', v)}
+                    placeholder="Déjalo vacío (auto) o p. ej. eth0,wlan0"
+                    hint="Separadas por coma. Vacío = auto-detección"
+                    help={HELP.ifaces}
+                    onHelp={setHelp}
+                    error={liveErrors.ifaces}
+                  />
+                </div>
+              </section>
+
+              <section className={cardCls}>
+                <h2 className={h2Cls}>Logs</h2>
+                <div className="flex items-center gap-4 mb-3 flex-wrap">
+                  <button
+                    className={`${btnGhost} ${btnSmall}`}
+                    onClick={loadLogs}
+                    disabled={logsLoading}
+                    aria-disabled={logsLoading}
+                  >
+                    {logsLoading ? (
+                      <>
+                        <span className={spinnerLight} aria-hidden="true"></span> Actualizando…
+                      </>
+                    ) : (
+                      'Actualizar'
+                    )}
+                  </button>
+                  <Switch checked={logsAuto} onChange={setLogsAuto} label="Actualizar cada 10s" />
+                </div>
+                <p className={descCls}>
+                  Últimas ejecuciones del job de presencia (cada minuto). Útil para ver por qué no llegó
+                  un anuncio de VoiceMonkey: busca <code>voicemonkey announce sent</code> o{' '}
+                  <code>failed</code>.
+                </p>
+                {logs && (
+                  <pre className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs leading-relaxed whitespace-pre-wrap break-words max-h-80 overflow-y-auto font-mono" aria-live="polite">
+                    {logs.exists ? logs.lines.join('\n') : 'No hay log todavía.'}
+                  </pre>
+                )}
+              </section>
+
+              <div className="mt-2">
+                <button className={`${btnPrimary} min-w-44`} onClick={save} disabled={saveState === 'saving' || loading}>
+                  {saveState === 'saving' ? (
+                    <>
+                      <span className={spinner} aria-hidden="true"></span> Guardando…
+                    </>
+                  ) : (
+                    'Guardar configuración'
+                  )}
+                </button>
+              </div>
+            </>
+          )}
         </>
       )}
 
