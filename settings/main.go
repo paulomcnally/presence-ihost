@@ -31,6 +31,10 @@ var (
 
 const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
 
+// voiceMonkeyVoice: Amazon Polly voice used for VoiceMonkey announcements.
+// Matches the working integration in p40la-ihost (Spanish voice).
+const voiceMonkeyVoice = "Lucia"
+
 var (
 	macRe               = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
 	ifaceRe             = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -399,6 +403,7 @@ func announceVoiceMonkey(apiKey, deviceID, speech string) error {
 		"token":  apiKey,
 		"device": deviceID,
 		"speech": speech,
+		"voice":  voiceMonkeyVoice,
 	})
 	if err != nil {
 		return err

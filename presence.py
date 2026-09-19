@@ -31,6 +31,7 @@ def getenv(name, default=None):
 
 
 VM_API = "https://api-v3.voicemonkey.io/announce"
+VM_VOICE = "Lucia"
 DB_PATH = getenv("DB_PATH", "/app/data/presence.db")
 ARP_SCAN_BIN = getenv("ARP_SCAN_BIN", "arp-scan")
 PING_TIMEOUT = getenv("PING_TIMEOUT", "1")
@@ -313,7 +314,7 @@ def send_voicemonkey(vm, device):
         return
     speech = message.replace("{device_name}", device.name)
     payload = json.dumps(
-        {"token": api_key, "device": device_id, "speech": speech}
+        {"token": api_key, "device": device_id, "speech": speech, "voice": VM_VOICE}
     ).encode("utf-8")
     try:
         request = urllib.request.Request(
