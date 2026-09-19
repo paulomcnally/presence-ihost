@@ -1,5 +1,7 @@
-# Build frontend
-FROM node:22-alpine AS frontend
+# Build frontend (glibc base: Tailwind v4 native deps ship linux-arm-gnueabihf
+# but not linux-arm-musl, so Alpine would break the arm/v7 build; dist is
+# architecture-independent and copied into the Alpine runtime stage below)
+FROM node:22-bookworm-slim AS frontend
 WORKDIR /build
 COPY frontend/package*.json ./
 RUN npm ci
