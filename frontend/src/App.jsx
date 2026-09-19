@@ -577,12 +577,18 @@ export default function App() {
     loadConfig()
   }, [authReady, canEdit])
 
-  useEffect(() => {
-    if (!loaded) return
+  function loadPresence() {
     fetch('/api/presence')
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
       .then(setPresence)
       .catch(() => setPresence(null))
+  }
+
+  useEffect(() => {
+    if (!loaded) return
+    loadPresence()
+    const t = setInterval(loadPresence, 10000)
+    return () => clearInterval(t)
   }, [loaded])
 
   useEffect(() => {

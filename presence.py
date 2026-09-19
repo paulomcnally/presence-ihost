@@ -32,6 +32,9 @@ def getenv(name, default=None):
 
 VM_API = "https://api-v3.voicemonkey.io/announce"
 VM_VOICE = "Lucia"
+# Cloudflare bloquea el user-agent por defecto de urllib ("Python-urllib/x",
+# error 1010). Hay que enviar un UA no marcado para que el request llegue a la API.
+VM_USER_AGENT = "presence-ihost/1.0"
 DB_PATH = getenv("DB_PATH", "/app/data/presence.db")
 ARP_SCAN_BIN = getenv("ARP_SCAN_BIN", "arp-scan")
 PING_TIMEOUT = getenv("PING_TIMEOUT", "1")
@@ -320,7 +323,7 @@ def send_voicemonkey(vm, device):
         request = urllib.request.Request(
             VM_API,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "User-Agent": VM_USER_AGENT},
             method="POST",
         )
         urllib.request.urlopen(request, timeout=10).close()
