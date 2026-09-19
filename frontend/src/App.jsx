@@ -301,6 +301,7 @@ export default function App() {
   const [testMsg, setTestMsg] = useState('')
   const [presence, setPresence] = useState(null)
   const [help, setHelp] = useState(null)
+  const [logs, setLogs] = useState(null)
 
   useEffect(() => {
     fetch('/api/config')
@@ -340,6 +341,13 @@ export default function App() {
 
   function removeDevice(i) {
     setCfg((c) => ({ ...c, devices: c.devices.filter((_, idx) => idx !== i) }))
+  }
+
+  function loadLogs() {
+    fetch('/api/log')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+      .then(setLogs)
+      .catch(() => setLogs(null))
   }
 
   async function save() {
@@ -519,6 +527,21 @@ export default function App() {
               <Field label="Scan prefix" type="number" value={cfg.settings.scan_prefix || '24'} onChange={(v) => setSetting('scan_prefix', v)} hint="Tamaño máximo de subred a escanear" help={HELP.scan_prefix} onHelp={setHelp} />
             </div>
             <Field label="Interfaces (IFACES)" value={cfg.settings.ifaces || ''} onChange={(v) => setSetting('ifaces', v)} placeholder="Déjalo vacío (auto) o p. ej. eth0,wlan0" hint="Separadas por coma. Vacío = auto-detección" help={HELP.ifaces} onHelp={setHelp} />
+          </section>
+
+          <section className="card">
+            <h2>
+              Logs
+              <button className="btn ghost small" onClick={loadLogs}>Actualizar</button>
+            </h2>
+            <p className="desc">
+              Últimas ejecuciones del job de presencia (cada minuto). Útil para ver por qué no llegó
+              un anuncio de VoiceMonkey: busca <code>voicemonkey announce sent</code> o{' '}
+              <code>failed</code>.
+            </p>
+            {logs && (
+              <pre className="log-view">{logs.exists ? logs.lines.join('\n') : 'No hay log todavía.'}</pre>
+            )}
           </section>
 
           <div className="actions">

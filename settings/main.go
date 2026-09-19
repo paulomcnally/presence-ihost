@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -339,6 +340,38 @@ func handleTest(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
+func handleLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	path := getenv("LOG_FILE", "/app/data/presence.log")
+	lines := 40
+	if n := r.URL.Query().Get("lines"); n != "" {
+		if v, err := strconv.Atoi(n); err == nil && v > 0 && v <= 500 {
+			lines = v
+		}
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			jsonOK(w, map[string]any{"file": path, "lines": []string{}, "exists": false})
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	all := strings.Split(strings.TrimRight(string(content), "\n"), "\n")
+	if all[0] == "" {
+		all = nil
+	}
+	start := 0
+	if len(all) > lines {
+		start = len(all) - lines
+	}
+	jsonOK(w, map[string]any{"file": path, "lines": all[start:], "exists": true})
+}
+
 func spaHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -376,6 +409,7 @@ func main() {
 	mux.HandleFunc("/api/config", handleConfig)
 	mux.HandleFunc("/api/presence", handlePresence)
 	mux.HandleFunc("/api/voicemonkey/test", handleTest)
+	mux.HandleFunc("/api/log", handleLog)
 	mux.Handle("/", spaHandler())
 
 	log.Printf("settings server listening on 0.0.0.0:%s (db=%s web=%s)", port, dbPath, webDir)

@@ -264,6 +264,26 @@ code {
   color: #cbd5e1;
 }
 
+.btn.small {
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  margin-left: 8px;
+}
+
+.log-view {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
 .btn.danger {
   background: transparent;
   border: 1px solid #7f1d1d;
