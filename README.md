@@ -129,16 +129,37 @@ docker run -d --name presence-ihost \
   paulomcnally/presence-ihost:latest
 ```
 
-## Building from source
+## Building from source (development only)
+
+For local development you can build the Go binary and the frontend separately:
 
 ```bash
-# local build requires Go 1.25+ and Node 20+ for the settings UI
+# requires Go 1.25+ and Node 20+
 cd frontend && npm install && npm run build && cd ..
 cd settings && go build -o settings-server . && cd ..
-
-docker buildx build --platform linux/arm/v7,linux/amd64 \
-  -t <your-user>/presence-ihost:latest --push .
 ```
+
+These local builds are **not** the release image. **Do not build or push the Docker
+image locally** — it is built automatically by CI.
+
+## Releases and Docker image
+
+The Docker image is **built and published exclusively by GitHub Actions**
+(`.github/workflows/docker-image.yml`), which runs when a `v*` tag is pushed. It
+builds `linux/arm/v7` and `linux/amd64` and pushes `paulomcnally/presence-ihost`
+with tags `vX.Y.Z` and `latest`.
+
+To cut a release:
+
+```bash
+./release.sh v0.2.1
+```
+
+This creates the git tag and a GitHub release; CI then builds and pushes the image.
+Never run `docker build`/`docker push` locally for releases.
+
+Docker Hub credentials are repository secrets (`DOCKERHUB_USERNAME`,
+`DOCKERHUB_TOKEN`), used only by CI.
 
 ## Troubleshooting
 
