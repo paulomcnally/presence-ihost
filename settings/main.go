@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS presence (
   last_seen REAL,
   ip        TEXT
 );
+CREATE TABLE IF NOT EXISTS sightings (
+  mac       TEXT PRIMARY KEY,
+  last_seen REAL NOT NULL,
+  source    TEXT NOT NULL DEFAULT 'passive'
+);
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -85,7 +90,50 @@ CREATE TABLE IF NOT EXISTS meta (
 	if err != nil {
 		return err
 	}
-	return migrateVoiceMonkey()
+	if err := migrateVoiceMonkey(); err != nil {
+		return err
+	}
+	return migratePresence()
+}
+
+// migratePresence adds columns that may not exist in DBs created before the
+// miss-count / per-device notification cooldown were introduced.
+func migratePresence() error {
+	rows, err := db.Query("PRAGMA table_info(presence)")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, col := range []string{"miss_count", "last_present_notify", "last_away_notify"} {
+		if cols[col] {
+			continue
+		}
+		ddl := "ALTER TABLE presence ADD COLUMN " + col
+		if col == "miss_count" {
+			ddl += " INTEGER NOT NULL DEFAULT 0"
+		} else {
+			ddl += " REAL"
+		}
+		if _, err := db.Exec(ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateVoiceMonkey adds columns that may not exist in DBs created before
@@ -124,12 +172,18 @@ func migrateVoiceMonkey() error {
 
 func seedDefaults() error {
 	defaults := map[string]string{
-		"grace":            "180",
-		"notify_cooldown":  "1800",
-		"ifaces":           "",
-		"scan_prefix":      "24",
-		"webhook_url":      "",
-		"log_level":        "INFO",
+		"grace":                   "180",
+		"notify_cooldown":         "1800",
+		"ifaces":                  "",
+		"scan_prefix":             "24",
+		"webhook_url":             "",
+		"log_level":               "INFO",
+		"away_confirmations":      "2",
+		"device_notify_cooldown":  "300",
+		"passive_sniff_enabled":   "true",
+		"passive_sniff_ifaces":    "",
+		"use_nmap":                "true",
+		"nmap_bin":                "nmap",
 	}
 	for k, v := range defaults {
 		_, err := db.Exec("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", k, v)
@@ -308,6 +362,44 @@ func validatePayload(payload map[string]any) (map[string]string, map[string]stri
 						break
 					}
 				}
+			}
+		}
+		if ac, ok := settings["away_confirmations"]; ok {
+			n, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(ac)))
+			if err != nil || n < 1 || n > 20 {
+				errors["away_confirmations"] = "Debe estar entre 1 y 20"
+			}
+		}
+		if dc, ok := settings["device_notify_cooldown"]; ok {
+			n, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(dc)))
+			if err != nil || n < 0 || n > 86400 {
+				errors["device_notify_cooldown"] = "Debe estar entre 0 y 86400 segundos"
+			}
+		}
+		for _, k := range []string{"passive_sniff_enabled", "use_nmap"} {
+			if v, ok := settings[k]; ok {
+				s := strings.ToLower(strings.TrimSpace(fmt.Sprint(v)))
+				if s != "true" && s != "false" && s != "1" && s != "0" {
+					errors[k] = "Debe ser true o false"
+				}
+			}
+		}
+		if pif, ok := settings["passive_sniff_ifaces"]; ok {
+			val := strings.TrimSpace(fmt.Sprint(pif))
+			if val != "" {
+				for _, token := range strings.Split(val, ",") {
+					token = strings.TrimSpace(token)
+					if token != "" && !ifaceRe.MatchString(token) {
+						errors["passive_sniff_ifaces"] = "Nombre de interfaz inválido"
+						break
+					}
+				}
+			}
+		}
+		if nb, ok := settings["nmap_bin"]; ok {
+			val := strings.TrimSpace(fmt.Sprint(nb))
+			if val == "" || controlRe.MatchString(val) || strings.ContainsAny(val, " \t\n") {
+				errors["nmap_bin"] = "Ruta al binario inválida"
 			}
 		}
 		if wh, ok := settings["webhook_url"]; ok {

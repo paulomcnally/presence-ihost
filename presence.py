@@ -3,9 +3,12 @@
 
 Runs as a one-shot job (scheduled every minute via cron in the container).
 Loads configuration and the previous presence state from a SQLite database,
-scans the LAN, detects transitions (device_present / device_away /
-anyone_home / anyone_away) and notifies via webhook and/or VoiceMonkey.
-No HTTP server is started.
+combines active scans (arp-scan + nmap in parallel, plus directed unicast
+probes) with passive sightings recorded by the sniffer daemon (sniffer.py),
+detects transitions (device_present / device_away / anyone_home /
+anyone_away) and notifies via webhook and/or VoiceMonkey.
+A device only goes away after AWAY_CONFIRMATIONS consecutive cycles without
+any signal (active or passive). No HTTP server is started.
 """
 import fcntl
 import ipaddress
@@ -17,13 +20,22 @@ import sqlite3
 import subprocess
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 LOG = logging.getLogger("presence")
 IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 MAC_RE = re.compile(r"^(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}$", re.IGNORECASE)
 SKIP_IFACE_PREFIXES = ("docker", "veth", "br-", "virbr", "lo")
+
+
+def setting_bool(*values):
+    """Return the first boolean-like interpretation of the given values."""
+    for value in values:
+        if value is None:
+            continue
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+    return False
 
 
 def getenv(name, default=None):
@@ -38,11 +50,13 @@ VM_VOICE = "Lucia"
 VM_USER_AGENT = "presence-ihost/1.0"
 DB_PATH = getenv("DB_PATH", "/app/data/presence.db")
 ARP_SCAN_BIN = getenv("ARP_SCAN_BIN", "arp-scan")
+ARPING_BIN = getenv("ARPING_BIN", "arping")
 ARP_RETRIES = int(getenv("ARP_RETRIES", "3"))
 ARP_TIMEOUT = int(getenv("ARP_TIMEOUT", "500"))
 PING_TIMEOUT = getenv("PING_TIMEOUT", "1")
 MAX_HOSTS = int(getenv("MAX_HOSTS", "1024"))
 LOCK_PATH = getenv("LOCK_PATH", "/app/data/presence.lock")
+SCAN_TIMEOUT = int(getenv("SCAN_TIMEOUT", "50"))
 
 
 def load_env_file(path):
@@ -126,7 +140,15 @@ CREATE TABLE IF NOT EXISTS presence (
   mac       TEXT PRIMARY KEY,
   present   INTEGER NOT NULL DEFAULT 0,
   last_seen REAL,
-  ip        TEXT
+  ip        TEXT,
+  miss_count INTEGER NOT NULL DEFAULT 0,
+  last_present_notify REAL,
+  last_away_notify REAL
+);
+CREATE TABLE IF NOT EXISTS sightings (
+  mac       TEXT PRIMARY KEY,
+  last_seen REAL NOT NULL,
+  source    TEXT NOT NULL DEFAULT 'passive'
 );
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
@@ -140,6 +162,14 @@ CREATE TABLE IF NOT EXISTS meta (
             conn.execute(
                 "ALTER TABLE voicemonkey ADD COLUMN %s TEXT NOT NULL DEFAULT ''" % col
             )
+    presence_cols = {r[1] for r in conn.execute("PRAGMA table_info(presence)")}
+    for col, ddl in (
+        ("miss_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_present_notify", "REAL"),
+        ("last_away_notify", "REAL"),
+    ):
+        if col not in presence_cols:
+            conn.execute("ALTER TABLE presence ADD COLUMN %s %s" % (col, ddl))
     conn.commit()
 
 
@@ -174,9 +204,26 @@ def load_vm(conn):
 
 def load_presence(conn):
     state = {}
-    for row in conn.execute("SELECT mac, present, last_seen, ip FROM presence"):
-        state[row[0]] = {"present": bool(row[1]), "last_seen": row[2], "ip": row[3]}
+    for row in conn.execute(
+        "SELECT mac, present, last_seen, ip, miss_count, last_present_notify, last_away_notify"
+        " FROM presence"
+    ):
+        state[row[0]] = {
+            "present": bool(row[1]),
+            "last_seen": row[2],
+            "ip": row[3],
+            "miss_count": row[4] or 0,
+            "last_present_notify": row[5],
+            "last_away_notify": row[6],
+        }
     return state
+
+
+def load_sightings(conn):
+    out = {}
+    for row in conn.execute("SELECT mac, last_seen FROM sightings"):
+        out[row[0]] = row[1]
+    return out
 
 
 def load_anyone(conn):
@@ -187,10 +234,22 @@ def load_anyone(conn):
 def save_presence(conn, devices):
     for device in devices:
         conn.execute(
-            "INSERT INTO presence(mac, present, last_seen, ip) VALUES(?, ?, ?, ?) "
+            "INSERT INTO presence(mac, present, last_seen, ip, miss_count,"
+            " last_present_notify, last_away_notify) VALUES(?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(mac) DO UPDATE SET present = excluded.present, "
-            "last_seen = excluded.last_seen, ip = excluded.ip",
-            (device.mac, int(device.present), device.last_seen, device.ip),
+            "last_seen = excluded.last_seen, ip = excluded.ip, "
+            "miss_count = excluded.miss_count, "
+            "last_present_notify = excluded.last_present_notify, "
+            "last_away_notify = excluded.last_away_notify",
+            (
+                device.mac,
+                int(device.present),
+                device.last_seen,
+                device.ip,
+                device.miss_count,
+                device.last_present_notify,
+                device.last_away_notify,
+            ),
         )
 
 
@@ -321,17 +380,113 @@ def ping_sweep(iface, network):
     return read_arp_table(iface)
 
 
-def scan_once(configured_ifaces, scan_prefix):
+def nmap_scan(iface, network, nmap_bin):
+    cmd = [nmap_bin, "-sn", "-n"]
+    if iface:
+        cmd += ["-e", iface]
+    cmd.append(str(network))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "exit code %s" % result.returncode)
+    devices = {}
+    current_ip = None
+    for line in result.stdout.splitlines():
+        match = re.match(r"Nmap scan report for (.+?)\s*$", line)
+        if match:
+            current_ip = match.group(1).strip()
+            if not IP_RE.match(current_ip):
+                current_ip = None
+            continue
+        mac_match = re.search(
+            r"MAC Address: (([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})", line
+        )
+        if mac_match and current_ip:
+            devices[normalize_mac(mac_match.group(1))] = current_ip
+    return devices
+
+
+def arping_probe(iface, ip):
+    try:
+        result = subprocess.run(
+            [ARPING_BIN, "-c", "1", "-w", "2", "-I", iface, ip],
+            capture_output=True, text=True, timeout=8,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def unicast_probe(iface, ip):
+    if iface:
+        ok = arping_probe(iface, ip)
+        if ok is not None:
+            return ok
+    try:
+        result = subprocess.run(
+            ["ping", "-c", "1", "-W", PING_TIMEOUT, ip],
+            capture_output=True, text=True, timeout=8,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def unicast_probe_pass(device_objs, configured_ifaces, seen):
+    ifaces = list_ifaces(configured_ifaces)
+    candidates = [
+        entry for entry in ifaces
+        if entry[0] and not entry[0].startswith(SKIP_IFACE_PREFIXES)
+    ]
+    if not candidates:
+        return {}
+    iface = candidates[0][0]
+    found = {}
+    for device in device_objs:
+        if device.mac in seen or not device.ip:
+            continue
+        if unicast_probe(iface, device.ip):
+            LOG.info("directed unicast probe confirmed %s at %s", device.name, device.ip)
+            found[device.mac] = device.ip
+    return found
+
+
+def scan_once(configured_ifaces, scan_prefix, use_nmap, nmap_bin):
     seen = {}
     for iface, ip, cidr in list_ifaces(configured_ifaces):
         network = scan_network(ip, cidr, scan_prefix)
         if not network:
             continue
-        try:
-            seen.update(arp_scan(iface, network))
-        except Exception as exc:
-            LOG.warning("arp-scan failed on %s (%s), falling back to ping sweep", iface, exc)
-            seen.update(ping_sweep(iface, network))
+
+        methods = [("arp-scan", lambda i=iface, n=network: arp_scan(i, n))]
+        if use_nmap:
+            methods.append(("nmap", lambda i=iface, n=network, b=nmap_bin: nmap_scan(i, n, b)))
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=len(methods)) as pool:
+            futures = {pool.submit(fn): name for name, fn in methods}
+            try:
+                for future in as_completed(futures, timeout=SCAN_TIMEOUT):
+                    name = futures[future]
+                    try:
+                        results[name] = future.result()
+                    except Exception as exc:
+                        LOG.warning("%s failed on %s: %s", name, iface, exc)
+            except TimeoutError:
+                LOG.warning(
+                    "active scan on %s exceeded %ss, using partial results",
+                    iface, SCAN_TIMEOUT,
+                )
+
+        for name, found in results.items():
+            LOG.debug("%s on %s found %d devices", name, iface, len(found))
+            seen.update(found)
+
+        if not results:
+            LOG.warning("active scan methods failed on %s, falling back to ping sweep", iface)
+            try:
+                seen.update(ping_sweep(iface, network))
+            except Exception as exc:
+                LOG.warning("ping sweep failed on %s: %s", iface, exc)
     return seen
 
 
@@ -355,6 +510,25 @@ def emit_webhook(webhook_url, event, device=None):
         urllib.request.urlopen(request, timeout=5).close()
     except Exception as exc:
         LOG.warning("webhook call failed: %s", exc)
+
+
+def maybe_device_notify(conn, webhook_url, device, event, cooldown, now):
+    """Rate-limit device_present/device_away webhooks per device."""
+    if event == "device_present":
+        last = device.last_present_notify
+    else:
+        last = device.last_away_notify
+    if last is not None and cooldown > 0 and now - last < cooldown:
+        LOG.info(
+            "suppressed %s for %s (%.0fs ago, cooldown %ss)",
+            event, device.name, now - last, cooldown,
+        )
+        return
+    if event == "device_present":
+        device.last_present_notify = now
+    else:
+        device.last_away_notify = now
+    emit_webhook(webhook_url, event, device)
 
 
 def send_voicemonkey(vm, device):
@@ -394,12 +568,16 @@ def send_voicemonkey(vm, device):
 
 
 class Device:
-    def __init__(self, name, mac, present=False, last_seen=None, ip=None):
+    def __init__(self, name, mac, present=False, last_seen=None, ip=None,
+                 miss_count=0, last_present_notify=None, last_away_notify=None):
         self.name = name
         self.mac = mac
         self.present = present
         self.last_seen = last_seen
         self.ip = ip
+        self.miss_count = miss_count
+        self.last_present_notify = last_present_notify
+        self.last_away_notify = last_away_notify
 
 
 def run_once():
@@ -423,6 +601,15 @@ def run_once():
             return 1
 
         grace = int(load_setting(conn, "grace") or getenv("GRACE", "180"))
+        away_confirmations = int(load_setting(conn, "away_confirmations") or getenv("AWAY_CONFIRMATIONS", "2"))
+        device_notify_cooldown = int(load_setting(conn, "device_notify_cooldown") or getenv("DEVICE_NOTIFY_COOLDOWN", "300"))
+        passive_sniff_enabled = setting_bool(
+            load_setting(conn, "passive_sniff_enabled"), getenv("PASSIVE_SNIFF_ENABLED", "true"),
+        )
+        use_nmap = setting_bool(
+            load_setting(conn, "use_nmap"), getenv("USE_NMAP", "true"),
+        )
+        nmap_bin = load_setting(conn, "nmap_bin") or getenv("NMAP_BIN", "nmap") or "nmap"
         ifaces = [item.strip() for item in (load_setting(conn, "ifaces") or "").split(",") if item.strip()]
         webhook_url = load_setting(conn, "webhook_url") or getenv("WEBHOOK_URL")
         scan_prefix = int(load_setting(conn, "scan_prefix") or getenv("SCAN_PREFIX", "24"))
@@ -441,32 +628,53 @@ def run_once():
                     present=prev.get("present", False),
                     last_seen=prev.get("last_seen"),
                     ip=prev.get("ip"),
+                    miss_count=prev.get("miss_count", 0),
+                    last_present_notify=prev.get("last_present_notify"),
+                    last_away_notify=prev.get("last_away_notify"),
                 )
             )
 
         LOG.info(
-            "starting scan: devices=%s ifaces=%s scan_prefix=%s",
+            "starting scan: devices=%s ifaces=%s scan_prefix=%s grace=%ss "
+            "away_confirmations=%s nmap=%s sniff=%s",
             [(d.name, d.mac) for d in device_objs], ifaces or "auto", scan_prefix,
+            grace, away_confirmations, use_nmap, passive_sniff_enabled,
         )
 
-        seen = scan_once(ifaces, scan_prefix)
-        LOG.info("scan found %d devices on LAN", len(seen))
+        seen = scan_once(ifaces, scan_prefix, use_nmap, nmap_bin)
+        seen.update(unicast_probe_pass(device_objs, ifaces, seen))
+        LOG.info("active scan found %d devices on LAN", len(seen))
+
+        sightings = load_sightings(conn) if passive_sniff_enabled else {}
+        passive_hits = sum(1 for device in device_objs if device.mac in sightings)
+        if passive_hits:
+            LOG.info("passive sniffing tracked %d of %d configured devices", passive_hits, len(device_objs))
 
         now = time.time()
         arrived = None
         for device in device_objs:
             ip = seen.get(device.mac)
-            if ip:
-                device.ip = ip
-                device.last_seen = now
+            passive = sightings.get(device.mac)
+            effective = max(now if ip else 0.0, passive or 0.0)
+            in_grace = effective > 0 and (now - effective) <= grace
+
+            if in_grace:
+                device.miss_count = 0
+                if ip:
+                    device.ip = ip
+                if effective > (device.last_seen or 0):
+                    device.last_seen = effective
                 if not device.present:
                     device.present = True
-                    emit_webhook(webhook_url, "device_present", device)
+                    maybe_device_notify(conn, webhook_url, device, "device_present", device_notify_cooldown, now)
                     if arrived is None:
                         arrived = device
-            elif device.present and (device.last_seen is None or now - device.last_seen > grace):
-                device.present = False
-                emit_webhook(webhook_url, "device_away", device)
+            elif device.present:
+                device.miss_count += 1
+                if device.miss_count >= away_confirmations:
+                    device.present = False
+                    device.miss_count = 0
+                    maybe_device_notify(conn, webhook_url, device, "device_away", device_notify_cooldown, now)
 
         anyone = any(device.present for device in device_objs)
         if anyone != prev_anyone:
@@ -492,8 +700,8 @@ def run_once():
         save_last_job_run(conn, now_iso())
         conn.commit()
         LOG.info(
-            "done: anyone_home=%s grace=%ss",
-            anyone, grace,
+            "done: anyone_home=%s grace=%ss away_confirmations=%s",
+            anyone, grace, away_confirmations,
         )
         return 0
     finally:

@@ -306,6 +306,33 @@ function validate(cfg, edited) {
     }
   }
 
+  const ac = parseInt(settings.away_confirmations, 10)
+  if (Number.isNaN(ac) || ac < 1 || ac > 20) {
+    errors.away_confirmations = 'Debe estar entre 1 y 20'
+  }
+  const dc = parseInt(settings.device_notify_cooldown, 10)
+  if (Number.isNaN(dc) || dc < 0 || dc > 86400) {
+    errors.device_notify_cooldown = 'Debe estar entre 0 y 86400 segundos'
+  }
+  for (const k of ['passive_sniff_enabled', 'use_nmap']) {
+    const v = String(settings[k] ?? '').toLowerCase()
+    if (v !== '' && v !== 'true' && v !== 'false' && v !== '1' && v !== '0') {
+      errors[k] = 'Debe ser true o false'
+    }
+  }
+  if (settings.passive_sniff_ifaces) {
+    const tokens = settings.passive_sniff_ifaces.split(',')
+    for (const t of tokens) {
+      if (t.trim() && !/^[a-zA-Z0-9._-]+$/.test(t.trim())) {
+        errors.passive_sniff_ifaces = 'Nombre de interfaz inválido'
+        break
+      }
+    }
+  }
+  if (settings.nmap_bin && String(settings.nmap_bin).trim() === '') {
+    errors.nmap_bin = 'Ruta al binario inválida'
+  }
+
   const wh = (settings.webhook_url || '').trim()
   if (wh) {
     let parsed = null
@@ -636,6 +663,10 @@ export default function App() {
 
   function setSetting(key, value) {
     setCfg((c) => ({ ...c, settings: { ...c.settings, [key]: value } }))
+  }
+
+  function setBoolSetting(key, value) {
+    setSetting(key, value ? 'true' : 'false')
   }
 
   function setVM(key, value) {
@@ -1123,6 +1154,24 @@ export default function App() {
                     onHelp={setHelp}
                     error={liveErrors.notify_cooldown}
                   />
+                  <Field
+                    id={fieldId('away_confirmations')}
+                    label="Confirmaciones de ausencia"
+                    type="number"
+                    value={cfg.settings.away_confirmations || '2'}
+                    onChange={(v) => setSetting('away_confirmations', v)}
+                    hint="Ciclos seguidos sin señal antes de marcar offline"
+                    error={liveErrors.away_confirmations}
+                  />
+                  <Field
+                    id={fieldId('device_notify_cooldown')}
+                    label="Cooldown por dispositivo (s)"
+                    type="number"
+                    value={cfg.settings.device_notify_cooldown || '300'}
+                    onChange={(v) => setSetting('device_notify_cooldown', v)}
+                    hint="Mínimo entre webhooks del mismo dispositivo"
+                    error={liveErrors.device_notify_cooldown}
+                  />
                 </div>
                 <div className="mt-3">
                   <Field
@@ -1135,6 +1184,68 @@ export default function App() {
                     help={HELP.ifaces}
                     onHelp={setHelp}
                     error={liveErrors.ifaces}
+                  />
+                </div>
+                <div className="mt-3 flex flex-col gap-3">
+                  <Switch
+                    checked={(cfg.settings.passive_sniff_enabled ?? 'true') === 'true'}
+                    onChange={(v) => setBoolSetting('passive_sniff_enabled', v)}
+                    label="Escucha pasiva (ARP/mDNS/DHCP)"
+                    help={{ title: 'Escucha pasiva (Layer 1)', body: (
+                      <>
+                        <p>
+                          Un daemon en segundo plano escucha el tráfico de la red (ARP, mDNS y DHCP)
+                          de forma continua y registra cada vez que ve uno de tus dispositivos. Esto
+                          es mucho más fiable que un escaneo puntual, porque no depende de que el
+                          dispositivo responda justo en el segundo del escaneo.
+                        </p>
+                        <p>
+                          Desactívalo solo si el hardware no soporta bien el sniffing (necesita{' '}
+                          <code>CAP_NET_RAW</code>/<code>CAP_NET_ADMIN</code>); el sistema seguirá
+                          funcionando con el escaneo activo.
+                        </p>
+                      </>
+                    ) }}
+                    onHelp={setHelp}
+                  />
+                  <Switch
+                    checked={(cfg.settings.use_nmap ?? 'true') === 'true'}
+                    onChange={(v) => setBoolSetting('use_nmap', v)}
+                    label="Usar nmap como método extra"
+                    help={{ title: 'Usar nmap (Layer 2)', body: (
+                      <>
+                        <p>
+                          Ejecuta <code>nmap -sn</code> en paralelo con <code>arp-scan</code> y une
+                          los resultados. Al usar implementaciones distintas, cada método detecta
+                          hosts que el otro a veces pierde.
+                        </p>
+                        <p>
+                          Además, cuando un dispositivo con IP conocida no aparece en el escaneo,
+                          se le envía un probe unicast dirigido (<code>arping</code>/<code>ping</code>)
+                          que tiene más probabilidad de despertar su radio.
+                        </p>
+                      </>
+                    ) }}
+                    onHelp={setHelp}
+                  />
+                </div>
+                <div className="grid gap-3 md:grid-cols-2 mt-3">
+                  <Field
+                    id={fieldId('passive_sniff_ifaces')}
+                    label="Interfaces de escucha pasiva"
+                    value={cfg.settings.passive_sniff_ifaces || ''}
+                    onChange={(v) => setSetting('passive_sniff_ifaces', v)}
+                    placeholder="Vacío = igual que IFACES"
+                    hint="Vacío usa las mismas que Interfaces"
+                    error={liveErrors.passive_sniff_ifaces}
+                  />
+                  <Field
+                    id={fieldId('nmap_bin')}
+                    label="Ruta a nmap"
+                    value={cfg.settings.nmap_bin || 'nmap'}
+                    onChange={(v) => setSetting('nmap_bin', v)}
+                    hint="Binario usado por el escaneo activo"
+                    error={liveErrors.nmap_bin}
                   />
                 </div>
               </section>

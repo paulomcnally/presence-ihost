@@ -18,10 +18,11 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /settings-server .
 
 # Runtime
 FROM alpine:3.22
-RUN apk add --no-cache arp-scan iproute2 iputils python3 tzdata \
+RUN apk add --no-cache arp-scan iproute2 iputils nmap tcpdump python3 tzdata \
     && mkdir -p /data /app/settings
 WORKDIR /app
 COPY presence.py /app/presence.py
+COPY sniffer.py /app/sniffer.py
 COPY entrypoint.sh /app/entrypoint.sh
 COPY --from=settings /settings-server /app/settings-server
 COPY --from=frontend /build/dist /app/settings/dist
