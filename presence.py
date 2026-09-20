@@ -108,11 +108,15 @@ CREATE TABLE IF NOT EXISTS devices (
   mac  TEXT NOT NULL UNIQUE
 );
 CREATE TABLE IF NOT EXISTS voicemonkey (
-  id        INTEGER PRIMARY KEY CHECK (id = 1),
-  enabled   INTEGER NOT NULL DEFAULT 0,
-  api_key   TEXT NOT NULL DEFAULT '',
-  device_id TEXT NOT NULL DEFAULT '',
-  message   TEXT NOT NULL DEFAULT ''
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled     INTEGER NOT NULL DEFAULT 0,
+  api_key     TEXT NOT NULL DEFAULT '',
+  device_id   TEXT NOT NULL DEFAULT '',
+  message     TEXT NOT NULL DEFAULT '',
+  voice       TEXT NOT NULL DEFAULT '',
+  language    TEXT NOT NULL DEFAULT '',
+  chime       TEXT NOT NULL DEFAULT '',
+  website_url TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS presence (
   mac       TEXT PRIMARY KEY,
@@ -126,6 +130,12 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
     )
+    for col in ("voice", "language", "chime", "website_url"):
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(voicemonkey)")}
+        if col not in existing:
+            conn.execute(
+                "ALTER TABLE voicemonkey ADD COLUMN %s TEXT NOT NULL DEFAULT ''" % col
+            )
     conn.commit()
 
 
@@ -141,7 +151,8 @@ def load_setting(conn, key):
 
 def load_vm(conn):
     row = conn.execute(
-        "SELECT enabled, api_key, device_id, message FROM voicemonkey WHERE id = 1"
+        "SELECT enabled, api_key, device_id, message, voice, language, chime, website_url"
+        " FROM voicemonkey WHERE id = 1"
     ).fetchone()
     if not row:
         return {}
@@ -150,6 +161,10 @@ def load_vm(conn):
         "api_key": row[1] or "",
         "device_id": row[2] or "",
         "message": row[3] or "",
+        "voice": row[4] or "",
+        "language": row[5] or "",
+        "chime": row[6] or "",
+        "website_url": row[7] or "",
     }
 
 
@@ -316,13 +331,23 @@ def send_voicemonkey(vm, device):
         LOG.warning("voicemonkey enabled but missing api_key/device_id/message")
         return
     speech = message.replace("{device_name}", device.name)
-    payload = json.dumps(
-        {"token": api_key, "device": device_id, "speech": speech, "voice": VM_VOICE}
-    ).encode("utf-8")
+    payload = {
+        "token": api_key,
+        "device": device_id,
+        "speech": speech,
+        "voice": vm.get("voice") or VM_VOICE,
+    }
+    if vm.get("language"):
+        payload["language"] = vm["language"]
+    if vm.get("chime"):
+        payload["chime"] = vm["chime"]
+    if vm.get("website_url"):
+        payload["website_url"] = vm["website_url"]
+    payload_json = json.dumps(payload).encode("utf-8")
     try:
         request = urllib.request.Request(
             VM_API,
-            data=payload,
+            data=payload_json,
             headers={"Content-Type": "application/json", "User-Agent": VM_USER_AGENT},
             method="POST",
         )

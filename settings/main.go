@@ -61,11 +61,15 @@ CREATE TABLE IF NOT EXISTS devices (
   mac  TEXT NOT NULL UNIQUE
 );
 CREATE TABLE IF NOT EXISTS voicemonkey (
-  id        INTEGER PRIMARY KEY CHECK (id = 1),
-  enabled   INTEGER NOT NULL DEFAULT 0,
-  api_key   TEXT NOT NULL DEFAULT '',
-  device_id TEXT NOT NULL DEFAULT '',
-  message   TEXT NOT NULL DEFAULT ''
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled     INTEGER NOT NULL DEFAULT 0,
+  api_key     TEXT NOT NULL DEFAULT '',
+  device_id   TEXT NOT NULL DEFAULT '',
+  message     TEXT NOT NULL DEFAULT '',
+  voice       TEXT NOT NULL DEFAULT '',
+  language    TEXT NOT NULL DEFAULT '',
+  chime       TEXT NOT NULL DEFAULT '',
+  website_url TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS presence (
   mac       TEXT PRIMARY KEY,
@@ -78,7 +82,44 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL
 );
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	return migrateVoiceMonkey()
+}
+
+// migrateVoiceMonkey adds columns that may not exist in DBs created before
+// the voice/language/chime/website_url options were introduced.
+func migrateVoiceMonkey() error {
+	rows, err := db.Query("PRAGMA table_info(voicemonkey)")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, col := range []string{"voice", "language", "chime", "website_url"} {
+		if cols[col] {
+			continue
+		}
+		if _, err := db.Exec("ALTER TABLE voicemonkey ADD COLUMN " + col + " TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func seedDefaults() error {
@@ -148,31 +189,35 @@ func loadDevices() ([]map[string]any, error) {
 	return out, rows.Err()
 }
 
-func currentAPIKey() string {
-	row := db.QueryRow("SELECT api_key FROM voicemonkey WHERE id = 1")
-	var key string
-	if err := row.Scan(&key); err != nil {
-		return ""
+func loadVoiceMonkeyRaw() (enabled bool, apiKey, deviceID, message, voice, language, chime, websiteURL string) {
+	row := db.QueryRow("SELECT enabled, api_key, device_id, message, voice, language, chime, website_url FROM voicemonkey WHERE id = 1")
+	var e int
+	if err := row.Scan(&e, &apiKey, &deviceID, &message, &voice, &language, &chime, &websiteURL); err != nil {
+		if err == sql.ErrNoRows {
+			return false, "", "", "", "", "", "", ""
+		}
+		return false, "", "", "", "", "", "", ""
 	}
-	return key
+	return e != 0, apiKey, deviceID, message, voice, language, chime, websiteURL
+}
+
+func currentAPIKey() string {
+	_, apiKey, _, _, _, _, _, _ := loadVoiceMonkeyRaw()
+	return apiKey
 }
 
 func loadVoiceMonkey() (map[string]any, error) {
-	row := db.QueryRow("SELECT enabled, api_key, device_id, message FROM voicemonkey WHERE id = 1")
-	var enabled int
-	var apiKey, deviceID, message string
-	if err := row.Scan(&enabled, &apiKey, &deviceID, &message); err != nil {
-		if err == sql.ErrNoRows {
-			return map[string]any{"enabled": false, "api_key_masked": "", "api_key_set": false, "device_id": "", "message": ""}, nil
-		}
-		return nil, err
-	}
+	enabled, apiKey, deviceID, message, voice, language, chime, websiteURL := loadVoiceMonkeyRaw()
 	return map[string]any{
-		"enabled":        enabled != 0,
+		"enabled":        enabled,
 		"api_key_masked": maskAPIKey(apiKey),
 		"api_key_set":    apiKey != "",
 		"device_id":      deviceID,
 		"message":        message,
+		"voice":          voice,
+		"language":       language,
+		"chime":          chime,
+		"website_url":    websiteURL,
 	}, nil
 }
 
@@ -331,6 +376,15 @@ func validatePayload(payload map[string]any) (map[string]string, map[string]stri
 				}
 			}
 		}
+		if wu, ok := vm["website_url"]; ok {
+			val := strings.TrimSpace(fmt.Sprint(wu))
+			if val != "" {
+				u, err := url.Parse(val)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+					errors["voicemonkey.website_url"] = "URL inválida"
+				}
+			}
+		}
 	}
 
 	return errors, warnings
@@ -387,9 +441,13 @@ func writeConfig(payload map[string]any) error {
 		}
 		deviceID, _ := vm["device_id"].(string)
 		message, _ := vm["message"].(string)
+		voice, _ := vm["voice"].(string)
+		language, _ := vm["language"].(string)
+		chime, _ := vm["chime"].(string)
+		websiteURL, _ := vm["website_url"].(string)
 		if _, err := tx.Exec(
-			"INSERT INTO voicemonkey(id, enabled, api_key, device_id, message) VALUES(1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, api_key = excluded.api_key, device_id = excluded.device_id, message = excluded.message",
-			enabled, apiKey, strings.TrimSpace(deviceID), message,
+			"INSERT INTO voicemonkey(id, enabled, api_key, device_id, message, voice, language, chime, website_url) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, api_key = excluded.api_key, device_id = excluded.device_id, message = excluded.message, voice = excluded.voice, language = excluded.language, chime = excluded.chime, website_url = excluded.website_url",
+			enabled, apiKey, strings.TrimSpace(deviceID), message, voice, language, chime, websiteURL,
 		); err != nil {
 			return err
 		}
@@ -398,13 +456,29 @@ func writeConfig(payload map[string]any) error {
 	return tx.Commit()
 }
 
-func announceVoiceMonkey(apiKey, deviceID, speech string) error {
-	body, err := json.Marshal(map[string]string{
-		"token":  apiKey,
-		"device": deviceID,
-		"speech": speech,
-		"voice":  voiceMonkeyVoice,
-	})
+type vmAnnounce struct {
+	Token, Device, Speech, Voice, Language, Chime, WebsiteURL string
+}
+
+func announceVoiceMonkey(a vmAnnounce) error {
+	payload := map[string]string{
+		"token":  a.Token,
+		"device": a.Device,
+		"speech": a.Speech,
+	}
+	if a.Voice != "" {
+		payload["voice"] = a.Voice
+	}
+	if a.Language != "" {
+		payload["language"] = a.Language
+	}
+	if a.Chime != "" {
+		payload["chime"] = a.Chime
+	}
+	if a.WebsiteURL != "" {
+		payload["website_url"] = a.WebsiteURL
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -750,9 +824,38 @@ func handleTest(w http.ResponseWriter, r *http.Request) {
 	apiKey := strings.TrimSpace(fmt.Sprint(payload["api_key"]))
 	deviceID := strings.TrimSpace(fmt.Sprint(payload["device_id"]))
 	speech, _ := payload["message"].(string)
-	stored := currentAPIKey()
-	if apiKey == "" || apiKey == maskAPIKey(stored) {
-		apiKey = stored
+	voice := strings.TrimSpace(fmt.Sprint(payload["voice"]))
+	language := strings.TrimSpace(fmt.Sprint(payload["language"]))
+	chime := strings.TrimSpace(fmt.Sprint(payload["chime"]))
+	websiteURL := strings.TrimSpace(fmt.Sprint(payload["website_url"]))
+
+	_, storedKey, storedDevice, storedMessage, storedVoice, storedLanguage, storedChime, storedWebsite := loadVoiceMonkeyRaw()
+	if apiKey == "" || apiKey == maskAPIKey(storedKey) {
+		apiKey = storedKey
+	}
+	if deviceID == "" {
+		deviceID = storedDevice
+	}
+	if speech == "" {
+		speech = storedMessage
+	}
+	if speech == "" {
+		speech = "Hola, prueba de presencia"
+	}
+	if voice == "" {
+		voice = storedVoice
+	}
+	if voice == "" {
+		voice = voiceMonkeyVoice
+	}
+	if language == "" {
+		language = storedLanguage
+	}
+	if chime == "" {
+		chime = storedChime
+	}
+	if websiteURL == "" {
+		websiteURL = storedWebsite
 	}
 	if apiKey == "" {
 		writeErr(w, http.StatusBadRequest, "Falta la API Key de VoiceMonkey")
@@ -762,10 +865,7 @@ func handleTest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "Falta el Device ID de VoiceMonkey")
 		return
 	}
-	if speech == "" {
-		speech = "Hola, prueba de presencia"
-	}
-	if err := announceVoiceMonkey(apiKey, deviceID, speech); err != nil {
+	if err := announceVoiceMonkey(vmAnnounce{Token: apiKey, Device: deviceID, Speech: speech, Voice: voice, Language: language, Chime: chime, WebsiteURL: websiteURL}); err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}

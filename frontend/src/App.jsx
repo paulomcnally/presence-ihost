@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react'
 const EMPTY = {
   settings: {},
   devices: [],
-  voicemonkey: { enabled: false, api_key: '', api_key_masked: '', api_key_set: false, device_id: '', message: '' }
+  voicemonkey: { enabled: false, api_key: '', api_key_masked: '', api_key_set: false, device_id: '', message: '', voice: '', language: '', chime: '', website_url: '' }
 }
 
 const btnBase =
@@ -324,6 +324,18 @@ function validate(cfg, edited) {
   const m = msg.match(/\{device_[^}]*\}/g)
   if (m && m.some((x) => x !== '{device_name}')) {
     warnings['voicemonkey.message'] = '¿Quisiste decir `{device_name}`?'
+  }
+
+  const wu = (vm.website_url || '').trim()
+  if (wu) {
+    try {
+      const u = new URL(wu)
+      if ((u.protocol !== 'http:' && u.protocol !== 'https:') || !u.hostname) {
+        errors['voicemonkey.website_url'] = 'URL inválida'
+      }
+    } catch (e) {
+      errors['voicemonkey.website_url'] = 'URL inválida'
+    }
   }
 
   return { errors, warnings }
@@ -871,6 +883,43 @@ export default function App() {
                         help={HELP.vm_message}
                         onHelp={setHelp}
                         warning={liveWarnings['voicemonkey.message']}
+                      />
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2 mt-3">
+                      <Field
+                        id={fieldId('voicemonkey.voice')}
+                        label="Voice"
+                        value={vm.voice}
+                        onChange={(v) => setVM('voice', v)}
+                        placeholder="Lupe"
+                        hint="Amazon Polly voice (vacío = Lucia)"
+                      />
+                      <Field
+                        id={fieldId('voicemonkey.language')}
+                        label="Language"
+                        value={vm.language}
+                        onChange={(v) => setVM('language', v)}
+                        placeholder="es-ES"
+                        hint="Código BCP-47, p. ej. es-ES"
+                      />
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2 mt-3">
+                      <Field
+                        id={fieldId('voicemonkey.chime')}
+                        label="Chime"
+                        value={vm.chime}
+                        onChange={(v) => setVM('chime', v)}
+                        placeholder="soundbank://soundlibrary/alarms/beeps_and_bloops/bell_02"
+                        hint="Sonido previo (soundbank URL)"
+                      />
+                      <Field
+                        id={fieldId('voicemonkey.website_url')}
+                        label="Website URL (Echo Show)"
+                        value={vm.website_url}
+                        onChange={(v) => setVM('website_url', v)}
+                        placeholder="https://www.paulomcnally.com/presence-ihost/"
+                        hint="Página que se muestra en pantalla (vacío = no se envía)"
+                        error={liveErrors['voicemonkey.website_url']}
                       />
                     </div>
                     <div className="mt-4 flex items-center gap-3 flex-wrap">
