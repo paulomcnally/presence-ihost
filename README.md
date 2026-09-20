@@ -10,8 +10,8 @@ The container runs a presence detection **job every minute**: it scans your loca
 2. It scans the local network using `arp-scan` (with a `ping` + `/proc/net/arp` fallback).
 3. It marks a device `online` when its MAC address is seen. A device goes `offline` only after `GRACE` seconds (default 180s) have passed since it was last seen — this avoids false negatives from devices in sleep mode.
 4. On every state change (`device_present`, `device_away`, `anyone_home`, `anyone_away`) it POSTs a JSON payload to the configured **webhook URL**.
-5. When the first configured device arrives (anyone → home), it can send a **VoiceMonkey announcement** to your Alexa with the name of the device that arrived.
-6. The new state is saved back to SQLite, ready for the next run.
+5. When the first configured device arrives (anyone → home), it can send a **VoiceMonkey announcement** to your Alexa with the name of the device that arrived. A **cooldown** (default 30 min) prevents duplicate welcome-home announcements when a phone that fell asleep or lost Wi-Fi briefly reappears.
+6. The new state is saved back to SQLite, ready for the next run. A file lock (`presence.lock`) guarantees only one scan runs at a time, even if a previous run is still in progress.
 
 > **Important:** the container must run with **host network mode**. A bridge network would isolate it from your LAN and it would not see any devices.
 
@@ -78,9 +78,12 @@ Configuration is stored in the SQLite database at `/app/data/presence.db` and ma
 | Variable (fallback) | Default | Description |
 | --- | --- | --- |
 | `GRACE` | `180` | Seconds without being seen before a device is marked offline |
+| `NOTIFY_COOLDOWN` | `1800` | Minimum seconds between two `anyone_home` announcements (avoids duplicate welcome-home when a device briefly drops off Wi-Fi) |
 | `IFACES` | *(auto)* | Comma-separated network interfaces to scan, e.g. `eth0,wlan0`. Empty = auto-detect |
 | `SCAN_PREFIX` | `24` | Max subnet size to scan (netmask). Interfaces with a larger subnet (e.g. `/16`) are reduced to this prefix to keep scans fast |
 | `WEBHOOK_URL` | *(none)* | URL that receives a `POST` JSON on state changes (see payload schema below) |
+| `ARP_RETRIES` | `3` | `arp-scan` retries per host (default 3). Raise if sleeping phones are missed and cause false `away` states |
+| `ARP_TIMEOUT` | `500` | `arp-scan` reply timeout in ms per retry (default 500). Raise on congested/slow Wi-Fi |
 | `DB_PATH` | `/app/data/presence.db` | SQLite database path |
 | `SETTINGS_PORT` | `8082` | Settings UI / configuration API port |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
@@ -133,7 +136,7 @@ VoiceMonkey makes Alexa speak a text. Create a **Speaker** device in VoiceMonkey
 - **Device ID:** the Speaker device ID.
 - **Message:** the text Alexa will say. Use `{device_name}` to include the name of the device that just arrived.
 
-The announcement is sent when `anyone_home` becomes true (the first configured device arrives). Use the **test button** in the UI to verify before relying on it.
+The announcement is sent when `anyone_home` becomes true (the first configured device arrives), at most once per **cooldown** period (default 30 min, configurable as `NOTIFY_COOLDOWN` in the UI/Scan options). Use the **test button** in the UI to verify before relying on it.
 
 ## Running with Docker (non-iHost)
 
@@ -192,4 +195,5 @@ Docker Hub credentials are repository secrets (`DOCKERHUB_USERNAME`,
 - **Stops detecting after a while:** the device is likely using a rotating private Wi-Fi address (iOS 18). Set it to `Fixed` or `Off` for that network.
 - **No notifications:** open the settings UI at `http://<ihost-ip>:8082`, add your devices and set the webhook URL and/or VoiceMonkey. Check `/app/data/presence.log` for job output.
 - **Offline takes ~3 minutes:** that is the expected `GRACE` (180s). Lower `GRACE` in the UI if you need faster offline detection.
+- **Receives «welcome home» twice:** the phone fell asleep / lost Wi-Fi for more than `GRACE` and then reappeared, flipping `anyone_away → anyone_home` again. Raise `NOTIFY_COOLDOWN` (default 1800s) or `GRACE`, and consider raising `ARP_RETRIES`/`ARP_TIMEOUT` so the scan misses fewer sleeping phones.
 - **Slow scans:** a large subnet (e.g. `/16` on a `dummy0` or secondary interface) was the main cause on iHost — `SCAN_PREFIX=24` mitigates it.

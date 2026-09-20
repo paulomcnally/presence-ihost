@@ -201,6 +201,27 @@ const HELP = {
       </>
     )
   },
+  notify_cooldown: {
+    title: 'Cooldown notificación (segundos)',
+    body: (
+      <>
+        <p>
+          Tiempo mínimo que debe pasar entre dos anuncios de «alguien llegó a casa» (
+          <code>anyone_home</code>).
+        </p>
+        <p>
+          Si tu móvil se duerme, se desconecta o pierde señal al llegar y vuelve a aparecer unos
+          minutos después, sin este margen recibirías el saludo de bienvenida <strong>dos veces</strong>{' '}
+          (una al llegar y otra al «reconectarse»).
+        </p>
+        <p>
+          <strong>Con 1800s (30 min):</strong> si vuelves a «aparecer» antes de 30 minutos de la última
+          bienvenida, no se reenvía el anuncio. No afecta al resto de eventos (<code>device_present</code>,
+          <code>device_away</code>, <code>anyone_away</code>), que siguen notificándose siempre.
+        </p>
+      </>
+    )
+  },
   scan_prefix: {
     title: 'Scan prefix (tamaño de subred)',
     body: (
@@ -266,6 +287,10 @@ function validate(cfg, edited) {
   const grace = parseInt(settings.grace, 10)
   if (Number.isNaN(grace) || grace < 10 || grace > 3600) {
     errors.grace = 'Debe estar entre 10 y 3600 segundos'
+  }
+  const nc = parseInt(settings.notify_cooldown, 10)
+  if (Number.isNaN(nc) || nc < 10 || nc > 86400) {
+    errors.notify_cooldown = 'Debe estar entre 10 y 86400 segundos'
   }
   const sp = parseInt(settings.scan_prefix, 10)
   if (Number.isNaN(sp) || sp < 16 || sp > 30) {
@@ -1086,6 +1111,17 @@ export default function App() {
                     help={HELP.scan_prefix}
                     onHelp={setHelp}
                     error={liveErrors.scan_prefix}
+                  />
+                  <Field
+                    id={fieldId('notify_cooldown')}
+                    label="Cooldown bienvenida (s)"
+                    type="number"
+                    value={cfg.settings.notify_cooldown || '1800'}
+                    onChange={(v) => setSetting('notify_cooldown', v)}
+                    hint="Mínimo entre anuncios de «llegó a casa»"
+                    help={HELP.notify_cooldown}
+                    onHelp={setHelp}
+                    error={liveErrors.notify_cooldown}
                   />
                 </div>
                 <div className="mt-3">

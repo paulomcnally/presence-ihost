@@ -7,6 +7,7 @@ scans the LAN, detects transitions (device_present / device_away /
 anyone_home / anyone_away) and notifies via webhook and/or VoiceMonkey.
 No HTTP server is started.
 """
+import fcntl
 import ipaddress
 import json
 import logging
@@ -37,8 +38,11 @@ VM_VOICE = "Lucia"
 VM_USER_AGENT = "presence-ihost/1.0"
 DB_PATH = getenv("DB_PATH", "/app/data/presence.db")
 ARP_SCAN_BIN = getenv("ARP_SCAN_BIN", "arp-scan")
+ARP_RETRIES = int(getenv("ARP_RETRIES", "3"))
+ARP_TIMEOUT = int(getenv("ARP_TIMEOUT", "500"))
 PING_TIMEOUT = getenv("PING_TIMEOUT", "1")
 MAX_HOSTS = int(getenv("MAX_HOSTS", "1024"))
+LOCK_PATH = getenv("LOCK_PATH", "/app/data/presence.lock")
 
 
 def load_env_file(path):
@@ -198,6 +202,35 @@ def save_anyone(conn, value):
     )
 
 
+def load_last_home(conn):
+    row = conn.execute("SELECT value FROM meta WHERE key = 'last_anyone_home'").fetchone()
+    if not row:
+        return None
+    try:
+        return float(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def save_last_home(conn, value):
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('last_anyone_home', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        ("%.0f" % value,),
+    )
+
+
+def acquire_lock():
+    try:
+        os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+        handle = open(LOCK_PATH, "w")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+    except OSError:
+        LOG.info("another presence run is in progress, skipping this run")
+        return None
+
+
 def save_last_job_run(conn, value):
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('last_job_run', ?) "
@@ -242,7 +275,10 @@ def scan_network(ip, cidr, scan_prefix):
 
 
 def arp_scan(iface, network):
-    cmd = [ARP_SCAN_BIN, "--plain", "--retry=1", "--timeout=100", "--ignoredups"]
+    cmd = [
+        ARP_SCAN_BIN, "--plain", "--retry=%s" % ARP_RETRIES,
+        "--timeout=%s" % ARP_TIMEOUT, "--ignoredups",
+    ]
     if iface:
         cmd.insert(1, "--interface=%s" % iface)
     cmd.append(str(network))
@@ -369,6 +405,10 @@ class Device:
 def run_once():
     load_env_file(getenv("ENV_FILE", "/app/data/.env"))
 
+    lock = acquire_lock()
+    if lock is None:
+        return 0
+
     conn = db_connect()
     ensure_schema(conn)
 
@@ -430,9 +470,22 @@ def run_once():
 
         anyone = any(device.present for device in device_objs)
         if anyone != prev_anyone:
-            emit_webhook(webhook_url, "anyone_home" if anyone else "anyone_away")
             if anyone and arrived is not None:
-                send_voicemonkey(vm, arrived)
+                cooldown = int(load_setting(conn, "notify_cooldown") or getenv("NOTIFY_COOLDOWN", "1800"))
+                last_home = load_last_home(conn)
+                if last_home is None or now - last_home > cooldown:
+                    emit_webhook(webhook_url, "anyone_home")
+                    send_voicemonkey(vm, arrived)
+                    save_last_home(conn, now)
+                else:
+                    LOG.info(
+                        "suppressed duplicate anyone_home notification "
+                        "(%.0fs ago, cooldown %ss)", now - last_home, cooldown,
+                    )
+            elif anyone:
+                emit_webhook(webhook_url, "anyone_home")
+            else:
+                emit_webhook(webhook_url, "anyone_away")
             save_anyone(conn, anyone)
 
         save_presence(conn, device_objs)
@@ -445,6 +498,7 @@ def run_once():
         return 0
     finally:
         conn.close()
+        lock.close()
 
 
 def main():

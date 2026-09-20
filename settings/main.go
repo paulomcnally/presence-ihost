@@ -124,11 +124,12 @@ func migrateVoiceMonkey() error {
 
 func seedDefaults() error {
 	defaults := map[string]string{
-		"grace":       "180",
-		"ifaces":      "",
-		"scan_prefix": "24",
-		"webhook_url": "",
-		"log_level":   "INFO",
+		"grace":            "180",
+		"notify_cooldown":  "1800",
+		"ifaces":           "",
+		"scan_prefix":      "24",
+		"webhook_url":      "",
+		"log_level":        "INFO",
 	}
 	for k, v := range defaults {
 		_, err := db.Exec("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", k, v)
@@ -283,6 +284,12 @@ func validatePayload(payload map[string]any) (map[string]string, map[string]stri
 			n, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(g)))
 			if err != nil || n < 10 || n > 3600 {
 				errors["grace"] = "Debe estar entre 10 y 3600 segundos"
+			}
+		}
+		if nc, ok := settings["notify_cooldown"]; ok {
+			n, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(nc)))
+			if err != nil || n < 10 || n > 86400 {
+				errors["notify_cooldown"] = "Debe estar entre 10 y 86400 segundos"
 			}
 		}
 		if sp, ok := settings["scan_prefix"]; ok {
