@@ -40,6 +40,7 @@ var (
 	ifaceRe             = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 	controlRe           = regexp.MustCompile(`[\x00-\x1f\x7f]`)
 	devicePlaceholderRe = regexp.MustCompile(`\{device_[^}]*\}`)
+	timeRe              = regexp.MustCompile(`^([01]?[0-9]|2[0-3]):[0-5][0-9]$`)
 )
 
 func getenv(key, def string) string {
@@ -119,12 +120,12 @@ func migratePresence() error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for _, col := range []string{"miss_count", "last_present_notify", "last_away_notify"} {
+	for _, col := range []string{"miss_count", "last_present_notify", "last_away_notify", "hit_count"} {
 		if cols[col] {
 			continue
 		}
 		ddl := "ALTER TABLE presence ADD COLUMN " + col
-		if col == "miss_count" {
+		if col == "miss_count" || col == "hit_count" {
 			ddl += " INTEGER NOT NULL DEFAULT 0"
 		} else {
 			ddl += " REAL"
@@ -184,6 +185,15 @@ func seedDefaults() error {
 		"passive_sniff_ifaces":    "",
 		"use_nmap":                "true",
 		"nmap_bin":                "nmap",
+		"home_confirmations":      "2",
+		"night_grace":             "600",
+		"night_start":             "",
+		"night_end":               "",
+		"night_away_confirmations": "4",
+		"quiet_hours_start":       "",
+		"quiet_hours_end":         "",
+		"arp_scan_timeout":        "10",
+		"nmap_scan_timeout":       "10",
 	}
 	for k, v := range defaults {
 		_, err := db.Exec("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", k, v)
@@ -374,6 +384,40 @@ func validatePayload(payload map[string]any) (map[string]string, map[string]stri
 			n, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(dc)))
 			if err != nil || n < 0 || n > 86400 {
 				errors["device_notify_cooldown"] = "Debe estar entre 0 y 86400 segundos"
+			}
+		}
+		if hc, ok := settings["home_confirmations"]; ok {
+			n, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(hc)))
+			if err != nil || n < 1 || n > 20 {
+				errors["home_confirmations"] = "Debe estar entre 1 y 20"
+			}
+		}
+		if ng, ok := settings["night_grace"]; ok {
+			n, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(ng)))
+			if err != nil || n < 0 || n > 3600 {
+				errors["night_grace"] = "Debe estar entre 0 y 3600 segundos"
+			}
+		}
+		if nac, ok := settings["night_away_confirmations"]; ok {
+			n, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(nac)))
+			if err != nil || n < 1 || n > 20 {
+				errors["night_away_confirmations"] = "Debe estar entre 1 y 20"
+			}
+		}
+		for _, k := range []string{"night_start", "night_end", "quiet_hours_start", "quiet_hours_end"} {
+			if v, ok := settings[k]; ok {
+				val := strings.TrimSpace(fmt.Sprint(v))
+				if val != "" && !timeRe.MatchString(val) {
+					errors[k] = "Formato inválido. Usa HH:MM (ej. 23:00)"
+				}
+			}
+		}
+		for _, k := range []string{"arp_scan_timeout", "nmap_scan_timeout"} {
+			if v, ok := settings[k]; ok {
+				n, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(v)))
+				if err != nil || n < 1 || n > 120 {
+					errors[k] = "Debe estar entre 1 y 120 segundos"
+				}
 			}
 		}
 		for _, k := range []string{"passive_sniff_enabled", "use_nmap"} {

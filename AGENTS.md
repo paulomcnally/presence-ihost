@@ -5,8 +5,9 @@
   (`paulomcnally/presence-ihost`) is built and published **only** by the GitHub
   Actions workflow `.github/workflows/docker-image.yml`, which runs automatically
   when a `v*` tag is pushed. Do not suggest, run, or document local image builds.
-- Releases are cut with `./release.sh vX.Y.Z` (creates the tag + GitHub release;
-  CI then builds the image). Never create tags or releases manually via git/gh
+- Releases are cut with `./release.sh` (auto-derives the next version from the last
+  published Docker image, or accepts `./release.sh vX.Y.Z`; creates the tag + GitHub
+  release; CI then builds the image). Never create tags or releases manually via git/gh
   unless explicitly asked.
 - Local Go and frontend builds (`go build`, `npm run build`) are fine for
   development and testing; they are not a substitute for the release image.

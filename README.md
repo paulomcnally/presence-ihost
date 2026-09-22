@@ -224,10 +224,12 @@ with tags `vX.Y.Z` and `latest`.
 To cut a release:
 
 ```bash
-./release.sh v0.2.1
+./release.sh
 ```
 
-This creates the git tag and a GitHub release; CI then builds and pushes the image.
+This derives the next patch version from the last image published on Docker Hub
+(or accepts an explicit version: `./release.sh v0.2.1`), creates the git tag and
+a GitHub release; CI then builds and pushes the image.
 Never run `docker build`/`docker push` locally for releases.
 
 Docker Hub credentials are repository secrets (`DOCKERHUB_USERNAME`,

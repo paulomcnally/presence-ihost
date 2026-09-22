@@ -274,6 +274,81 @@ const HELP = {
         </ul>
       </>
     )
+  },
+  home_confirmations: {
+    title: 'Confirmaciones de regreso',
+    body: (
+      <>
+        <p>
+          Cuántas veces seguidas debe <strong>verse</strong> un dispositivo antes de marcarse como{' '}
+          <strong>online</strong> y disparar la bienvenida.
+        </p>
+        <p>
+          Es el espejo de «Confirmaciones de ausencia»: evita que un «parpadeo» (aparece un solo
+          escaneo y vuelve a desaparecer) genere un saludo falso a medianoche.
+        </p>
+        <p>
+          <strong>Con 2:</strong> el dispositivo debe verse en 2 ciclos seguidos antes de notificar.
+          Cada ciclo dura ~1 minuto, así que retrasa la bienvenida hasta 1 minuto a cambio de
+          eliminar casi todos los falsos positivos.
+        </p>
+      </>
+    )
+  },
+  night_window: {
+    title: 'Ventana nocturna',
+    body: (
+      <>
+        <p>
+          Si defines <code>Noche desde</code> y <code>Noche hasta</code>, durante esa franja el sistema
+          usa valores <strong>más tolerantes</strong> de grace y confirmaciones de ausencia.
+        </p>
+        <p>
+          El móvil entra en ahorro de energía durante la noche y deja de responder durante varios
+          minutos. Con un grace nocturno alto (600-900s) y más confirmaciones, un «sueño de red»
+          prolongado ya no dispara un ciclo falso <code>away → home</code>.
+        </p>
+        <p>
+          Formato <code>HH:MM</code>. Si «hasta» es menor que «desde» la ventana cruza la medianoche
+          (ej. <code>23:00</code>–<code>07:00</code>). Vacío = desactivado.
+        </p>
+      </>
+    )
+  },
+  quiet_hours: {
+    title: 'Horas de silencio',
+    body: (
+      <>
+        <p>
+          Si un evento <code>anyone_home</code> ocurre dentro de esta franja, <strong>no</strong> se
+          envía el webhook ni el anuncio de VoiceMonkey. El cambio de estado sí se guarda en la base
+          de datos y en el log, para no perder visibilidad.
+        </p>
+        <p>
+          Es una red de seguridad extra por si el teléfono se despierta a medianoche; no sustituye
+          a la ventana nocturna ni a las confirmaciones de regreso.
+        </p>
+        <p>
+          Formato <code>HH:MM</code>, cruza la medianoche si «hasta» es menor. Vacío = desactivado.
+        </p>
+      </>
+    )
+  },
+  scan_timeouts: {
+    title: 'Timeouts de escaneo',
+    body: (
+      <>
+        <p>
+          Tiempo máximo (segundos) que se espera a cada herramienta de escaneo en cada interfaz antes
+          de descartarla y pasar a la siguiente. Si una interfaz no responde (p. ej. <code>dummy0</code>),
+          un timeout corto evita perder 30s por ciclo.
+        </p>
+        <p>
+          <strong>arp-scan timeout</strong> y <strong>nmap timeout</strong> controlan cada binario por
+          separado. Déjalos en 10s; súbelos solo si tu red es grande (más de ~250 hosts).
+        </p>
+      </>
+    )
   }
 }
 
@@ -313,6 +388,30 @@ function validate(cfg, edited) {
   const dc = parseInt(settings.device_notify_cooldown, 10)
   if (Number.isNaN(dc) || dc < 0 || dc > 86400) {
     errors.device_notify_cooldown = 'Debe estar entre 0 y 86400 segundos'
+  }
+  const hc = parseInt(settings.home_confirmations, 10)
+  if (Number.isNaN(hc) || hc < 1 || hc > 20) {
+    errors.home_confirmations = 'Debe estar entre 1 y 20'
+  }
+  const ng = parseInt(settings.night_grace, 10)
+  if (Number.isNaN(ng) || ng < 0 || ng > 3600) {
+    errors.night_grace = 'Debe estar entre 0 y 3600 segundos'
+  }
+  const nac = parseInt(settings.night_away_confirmations, 10)
+  if (Number.isNaN(nac) || nac < 1 || nac > 20) {
+    errors.night_away_confirmations = 'Debe estar entre 1 y 20'
+  }
+  for (const k of ['night_start', 'night_end', 'quiet_hours_start', 'quiet_hours_end']) {
+    const v = (settings[k] || '').trim()
+    if (v && !/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/.test(v)) {
+      errors[k] = 'Formato inválido. Usa HH:MM (ej. 23:00)'
+    }
+  }
+  for (const k of ['arp_scan_timeout', 'nmap_scan_timeout']) {
+    const n = parseInt(settings[k], 10)
+    if (Number.isNaN(n) || n < 1 || n > 120) {
+      errors[k] = 'Debe estar entre 1 y 120 segundos'
+    }
   }
   for (const k of ['passive_sniff_enabled', 'use_nmap']) {
     const v = String(settings[k] ?? '').toLowerCase()
@@ -1172,6 +1271,17 @@ export default function App() {
                     hint="Mínimo entre webhooks del mismo dispositivo"
                     error={liveErrors.device_notify_cooldown}
                   />
+                  <Field
+                    id={fieldId('home_confirmations')}
+                    label="Confirmaciones de regreso"
+                    type="number"
+                    value={cfg.settings.home_confirmations || '2'}
+                    onChange={(v) => setSetting('home_confirmations', v)}
+                    hint="Ciclos seguidos vistos antes de marcar online"
+                    help={HELP.home_confirmations}
+                    onHelp={setHelp}
+                    error={liveErrors.home_confirmations}
+                  />
                 </div>
                 <div className="mt-3">
                   <Field
@@ -1246,6 +1356,104 @@ export default function App() {
                     onChange={(v) => setSetting('nmap_bin', v)}
                     hint="Binario usado por el escaneo activo"
                     error={liveErrors.nmap_bin}
+                  />
+                  <Field
+                    id={fieldId('arp_scan_timeout')}
+                    label="Timeout arp-scan (s)"
+                    type="number"
+                    value={cfg.settings.arp_scan_timeout || '10'}
+                    onChange={(v) => setSetting('arp_scan_timeout', v)}
+                    hint="Máx. por interfaz antes de descartar"
+                    help={HELP.scan_timeouts}
+                    onHelp={setHelp}
+                    error={liveErrors.arp_scan_timeout}
+                  />
+                  <Field
+                    id={fieldId('nmap_scan_timeout')}
+                    label="Timeout nmap (s)"
+                    type="number"
+                    value={cfg.settings.nmap_scan_timeout || '10'}
+                    onChange={(v) => setSetting('nmap_scan_timeout', v)}
+                    hint="Máx. por interfaz antes de descartar"
+                    help={HELP.scan_timeouts}
+                    onHelp={setHelp}
+                    error={liveErrors.nmap_scan_timeout}
+                  />
+                </div>
+              </section>
+
+              <section className={cardCls}>
+                <h2 className={h2Cls}>Noche y horas de silencio</h2>
+                <p className={descCls}>
+                  Para evitar la bienvenida falsa de medianoche cuando el móvil duerme su Wi-Fi:
+                  valores más tolerantes de noche y opcionalmente silencio total en una franja.
+                </p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Field
+                    id={fieldId('night_start')}
+                    label="Noche desde (HH:MM)"
+                    value={cfg.settings.night_start || ''}
+                    onChange={(v) => setSetting('night_start', v)}
+                    placeholder="23:00"
+                    hint="Inicio de la ventana nocturna"
+                    help={HELP.night_window}
+                    onHelp={setHelp}
+                    error={liveErrors.night_start}
+                  />
+                  <Field
+                    id={fieldId('night_end')}
+                    label="Noche hasta (HH:MM)"
+                    value={cfg.settings.night_end || ''}
+                    onChange={(v) => setSetting('night_end', v)}
+                    placeholder="07:00"
+                    hint="Fin de la ventana nocturna"
+                    help={HELP.night_window}
+                    onHelp={setHelp}
+                    error={liveErrors.night_end}
+                  />
+                  <Field
+                    id={fieldId('night_grace')}
+                    label="Grace nocturno (s)"
+                    type="number"
+                    value={cfg.settings.night_grace || '600'}
+                    onChange={(v) => setSetting('night_grace', v)}
+                    hint="Segundos sin verse antes de marcar offline de noche"
+                    help={HELP.night_window}
+                    onHelp={setHelp}
+                    error={liveErrors.night_grace}
+                  />
+                  <Field
+                    id={fieldId('night_away_confirmations')}
+                    label="Confirmaciones de ausencia nocturnas"
+                    type="number"
+                    value={cfg.settings.night_away_confirmations || '4'}
+                    onChange={(v) => setSetting('night_away_confirmations', v)}
+                    hint="Ciclos seguidos sin señal antes de offline de noche"
+                    help={HELP.night_window}
+                    onHelp={setHelp}
+                    error={liveErrors.night_away_confirmations}
+                  />
+                  <Field
+                    id={fieldId('quiet_hours_start')}
+                    label="Silencio desde (HH:MM)"
+                    value={cfg.settings.quiet_hours_start || ''}
+                    onChange={(v) => setSetting('quiet_hours_start', v)}
+                    placeholder="23:00"
+                    hint="No notificar anyone_home en esta franja"
+                    help={HELP.quiet_hours}
+                    onHelp={setHelp}
+                    error={liveErrors.quiet_hours_start}
+                  />
+                  <Field
+                    id={fieldId('quiet_hours_end')}
+                    label="Silencio hasta (HH:MM)"
+                    value={cfg.settings.quiet_hours_end || ''}
+                    onChange={(v) => setSetting('quiet_hours_end', v)}
+                    placeholder="07:00"
+                    hint="Fin de la franja de silencio"
+                    help={HELP.quiet_hours}
+                    onHelp={setHelp}
+                    error={liveErrors.quiet_hours_end}
                   />
                 </div>
               </section>
