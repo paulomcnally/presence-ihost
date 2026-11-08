@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -173,27 +174,27 @@ func migrateVoiceMonkey() error {
 
 func seedDefaults() error {
 	defaults := map[string]string{
-		"grace":                   "180",
-		"notify_cooldown":         "1800",
-		"ifaces":                  "",
-		"scan_prefix":             "24",
-		"webhook_url":             "",
-		"log_level":               "INFO",
-		"away_confirmations":      "2",
-		"device_notify_cooldown":  "300",
-		"passive_sniff_enabled":   "true",
-		"passive_sniff_ifaces":    "",
-		"use_nmap":                "true",
-		"nmap_bin":                "nmap",
-		"home_confirmations":      "2",
-		"night_grace":             "600",
-		"night_start":             "",
-		"night_end":               "",
+		"grace":                    "180",
+		"notify_cooldown":          "1800",
+		"ifaces":                   "",
+		"scan_prefix":              "24",
+		"webhook_url":              "",
+		"log_level":                "INFO",
+		"away_confirmations":       "2",
+		"device_notify_cooldown":   "300",
+		"passive_sniff_enabled":    "true",
+		"passive_sniff_ifaces":     "",
+		"use_nmap":                 "true",
+		"nmap_bin":                 "nmap",
+		"home_confirmations":       "2",
+		"night_grace":              "600",
+		"night_start":              "",
+		"night_end":                "",
 		"night_away_confirmations": "4",
-		"quiet_hours_start":       "",
-		"quiet_hours_end":         "",
-		"arp_scan_timeout":        "10",
-		"nmap_scan_timeout":       "10",
+		"quiet_hours_start":        "",
+		"quiet_hours_end":          "",
+		"arp_scan_timeout":         "10",
+		"nmap_scan_timeout":        "10",
 	}
 	for k, v := range defaults {
 		_, err := db.Exec("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", k, v)
@@ -329,6 +330,18 @@ func maskAPIKey(key string) string {
 		return strings.Repeat("•", len(key))
 	}
 	return key[:5] + "-…-" + key[len(key)-4:]
+}
+
+// stringField returns a trimmed string field, treating missing or null values
+// as "". It avoids fmt.Sprint(nil), which yields "<nil>" and would defeat the
+// "empty -> use stored value" fallbacks (and could even overwrite the stored
+// VoiceMonkey token with the literal "<nil>").
+func stringField(m map[string]any, key string) string {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
 }
 
 func normalizeMAC(v string) string {
@@ -499,7 +512,7 @@ func validatePayload(payload map[string]any) (map[string]string, map[string]stri
 	if vm, ok := payload["voicemonkey"].(map[string]any); ok {
 		enabled, _ := vm["enabled"].(bool)
 		if enabled {
-			effKey := strings.TrimSpace(fmt.Sprint(vm["api_key"]))
+			effKey := stringField(vm, "api_key")
 			if effKey == "" || effKey == maskAPIKey(currentAPIKey()) {
 				effKey = currentAPIKey()
 			}
@@ -578,7 +591,7 @@ func writeConfig(payload map[string]any) error {
 			enabled = 1
 		}
 		storedKey := currentAPIKey()
-		apiKey := strings.TrimSpace(fmt.Sprint(vm["api_key"]))
+		apiKey := stringField(vm, "api_key")
 		if apiKey == "" || apiKey == maskAPIKey(storedKey) {
 			apiKey = storedKey
 		}
@@ -632,6 +645,12 @@ func announceVoiceMonkey(a vmAnnounce) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
+		// Include VoiceMonkey's reason (e.g. INVALID_TOKEN) so the UI can show
+		// something actionable instead of just the HTTP status.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if msg := strings.TrimSpace(string(body)); msg != "" {
+			return fmt.Errorf("voicemonkey returned status %d: %s", resp.StatusCode, msg)
+		}
 		return fmt.Errorf("voicemonkey returned status %d", resp.StatusCode)
 	}
 	return nil
@@ -964,13 +983,13 @@ func handleTest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	apiKey := strings.TrimSpace(fmt.Sprint(payload["api_key"]))
-	deviceID := strings.TrimSpace(fmt.Sprint(payload["device_id"]))
+	apiKey := stringField(payload, "api_key")
+	deviceID := stringField(payload, "device_id")
 	speech, _ := payload["message"].(string)
-	voice := strings.TrimSpace(fmt.Sprint(payload["voice"]))
-	language := strings.TrimSpace(fmt.Sprint(payload["language"]))
-	chime := strings.TrimSpace(fmt.Sprint(payload["chime"]))
-	websiteURL := strings.TrimSpace(fmt.Sprint(payload["website_url"]))
+	voice := stringField(payload, "voice")
+	language := stringField(payload, "language")
+	chime := stringField(payload, "chime")
+	websiteURL := stringField(payload, "website_url")
 
 	_, storedKey, storedDevice, storedMessage, storedVoice, storedLanguage, storedChime, storedWebsite := loadVoiceMonkeyRaw()
 	if apiKey == "" || apiKey == maskAPIKey(storedKey) {

@@ -855,7 +855,11 @@ export default function App() {
         body: JSON.stringify({
           api_key: vmKeyEdited ? cfg.voicemonkey.api_key : '',
           device_id: cfg.voicemonkey.device_id,
-          message: cfg.voicemonkey.message
+          message: cfg.voicemonkey.message,
+          voice: cfg.voicemonkey.voice,
+          language: cfg.voicemonkey.language,
+          chime: cfg.voicemonkey.chime,
+          website_url: cfg.voicemonkey.website_url
         })
       })
       const data = await res.json().catch(() => ({}))
