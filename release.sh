@@ -99,7 +99,7 @@ gh release create "$VERSION" \
 $NOTES
 
 The multi-arch Docker image is built and published automatically by GitHub Actions on this tag:
-\`paulomcnally/presence-ihost:$VERSION\` (linux/arm/v7, linux/amd64)."
+\`paulomcnally/presence-ihost:${VERSION#v}\` (linux/arm/v7, linux/amd64)."
 
 echo "Release $VERSION created: https://github.com/paulomcnally/presence-ihost/releases/tag/$VERSION"
 echo "Docker image will be built automatically by CI (do NOT build locally)."
